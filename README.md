@@ -1,5 +1,5 @@
 - 👋 Hi, I’m @cartosquare
-- 👀 I’m interested in Cartography, deeplearning, c++
+- 👀 I’m interested in Cartography, deeplearning, c++, flutter ...
 - 🌱 I’m currently learning deeplearning engine
 - 💞️ I’m looking to collaborate on AI GIS
 - 📫 How to reach me : 1517374954@qq.com
