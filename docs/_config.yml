@@ -26,6 +26,7 @@ plugins:
   - jekyll-seo-tag
   - jekyll-paginate
   - jekyll-sitemap
+  - jemoji
 
 # Custom variables
 owner : "ThatDoge"
