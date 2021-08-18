@@ -28,6 +28,9 @@ plugins:
   - jekyll-sitemap
   - jemoji
 
+emoji:
+  src: "https://github.githubassets.com/images/icons/"
+
 # Custom variables
 owner : "ThatDoge"
 year : "2021"
