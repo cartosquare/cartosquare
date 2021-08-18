@@ -1,4 +1,4 @@
-## Welcome to GitHub Pages
+## :clap::clap:欢迎来到CartoSquare:woozy_face::woozy_face:
 
 You can use the [editor on GitHub](https://github.com/cartosquare/cartosquare/edit/main/docs/index.md) to maintain and preview the content for your website in Markdown files.
 
