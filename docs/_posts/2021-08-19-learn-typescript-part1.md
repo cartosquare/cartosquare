@@ -7,7 +7,7 @@ published: true
 
 TypeScript = JavaScript with static-type checking.
 
-TypeScript相比于Javascript的优势在于：
+TypeScript 相比于JavaScript 的优势在于：
 
 * 避免类型错误。比如，把一个变量当成函数来调用:
 
