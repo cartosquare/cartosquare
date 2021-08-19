@@ -166,3 +166,16 @@ program 可以根据自己的规则修改在它之下的 accounts。如果一个
   - 并且仅当 account 不是可执行的
 - 可执行的设定是不可逆的，并且只有是 account owner 可以设定
 - 没有人可以修改 account 的租金费率
+
+## Compute Budget
+
+为了防止 program 滥用计算资源，每个程序被赋予计算预算，超出预算程序会被暂停并报错。
+
+下面的操作会消耗计算成本：
+
+- 执行 BPF 指令
+- 调用系统函数
+  - 日志
+  - 创建 program 地址
+  - 跨 program 调用
+  - ...
