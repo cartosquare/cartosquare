@@ -1,20 +1,22 @@
 ---
-title: Learn Typescript
+title: Learn Typescript Part 1
 published: true
 ---
 
+:computer::computer:
+
 TypeScript = JavaScript with static-type checking.
 
-相比于Javascript的优势在于：
+TypeScript相比于Javascript的优势在于：
 
-> 避免类型错误。比如，把一个变量当成函数来调用:
+* 避免类型错误。比如，把一个变量当成函数来调用:
 
 ```typescript
 const message = "hello!";
 
 message();
 ```
-> 避免不存在对象/属性/函数的错误。比如，调用一个对象的不存在的属性:
+* 避免不存在对象/属性/函数的错误。比如，调用一个对象的不存在的属性:
 
 ```typescript
 const user = {
@@ -34,7 +36,7 @@ const announcement = "Hello World!";
 announcement.toLocalLowerCase();
 ```
 
-> 避免函数未调用的错误：
+* 避免函数未调用的错误：
 
 ```typescript
 function flipCoin() {
@@ -42,7 +44,7 @@ function flipCoin() {
   return Math.random < 0.5;
 }
 ```
-> 避免基本逻辑错误：
+* 避免基本逻辑错误：
 
 ```typescript
 const value = Math.random() < 0.5 ? "a" : "b";
@@ -52,7 +54,7 @@ if (value != "a") {
   // 这个条件内的代码永远不会被执行
 }
 ```
-> 可以在编辑器里提供类型错误信息（不需要编译），提供代码补全功能，快速修复错误功能
+* 可以在编辑器里提供类型错误信息（不需要编译），提供代码补全功能，快速修复错误功能
 
 # `tsc`，TypeScript的编译器
 
@@ -72,23 +74,23 @@ tsc source.ts
 
 ## 常用编译选项
 
-> --noEmitOnError
+* --noEmitOnError
 
 出现错误不更新目标文件
 
-> --target
+* --target
 
-用于制定输出的ES规范，默认输出ES3规范，比如`--target es2015`指定输出 ECMAScript 2015规范的代码。
+用于制定输出的ES规范，默认输出ES3规范，比如 `--target es2015` 指定输出 ECMAScript 2015规范的代码。
 
-> --strict
+* --strict
 
-要求编译器检测类型错误、null/undefined错误，以及隐式把类型推断为`any`的错误。
+要求编译器检测类型错误、null/undefined错误，以及隐式把类型推断为 `any` 的错误。
 
-> --noImpliciAny
+* --noImpliciAny
 
-要求编译器检测隐式把类型推断为`any`的错误
+要求编译器检测隐式把类型推断为 `any` 的错误
 
-> --strictNullChecks 
+* --strictNullChecks 
 
 要求编译器检测null/undefined错误
 
@@ -96,16 +98,15 @@ tsc source.ts
 
 ## 基本数据类型
 
-> string
+* string
 
-> number
+* number
 
-
-> boolean
+* boolean
 
 ## 数组
 
-类型后面跟`[]`，比如，数值数组：`number[]`，字符串数组：`string[]`
+类型后面跟 `[]`，比如，数值数组：`number[]`，字符串数组：`string[]`
 
 ## any
 
@@ -148,7 +149,7 @@ printName({ first: "Alice", last: "Alisson" });
 
 ## Union 类型
 
-变量后面冒号加`｜`操作符串联的类型：
+变量后面冒号加 `｜` 操作符串联的类型：
 
 ```typescript
 function printId(id: number | string) {
@@ -220,7 +221,7 @@ const myCanvas = document.getElementById("main_canvas") as HTMLCanvasElement;
 const constantString = "Hello World";
 ```
 
-常量类型通常在`Union`中使用：
+常量类型通常在 `Union` 中使用：
 
 ```typescript
 function printText(s: string, alignment: "left" | "right" | "center") {
@@ -271,16 +272,16 @@ if (someCondition) {
 }
 ```
 
-这里`const`的含义是值：`counter`的类型是`number`，而不是**常量变量0**。
+这里 `const` 的含义是值：`counter` 的类型是 `number`，而不是**常量变量0**。
 
 同理，对于`string`也是一样：
 
 ```typescript
 const req = { url: "https://some.com", method: "GET" };
 ```
-这里`method`的类型是`string`，而不是`GET`常量。
+这里 `method` 的类型是 `string`，而不是 `GET` 常量。
 
-如果想要让属性也推断为常量，可以用`as`操作符，或者`as const`后缀：
+如果想要让属性也推断为常量，可以用 `as` 操作符，或者 `as const` 后缀：
 
 ```typescript
 const req = { url: "https://example.com", method: "GET" as "GET" };
@@ -289,7 +290,7 @@ const req = { url: "https://example.com", method: "GET" as "GET" };
 onst req = { url: "https://example.com", method: "GET" } as const;
 ```
 
-## `null`和`undefined`类型
+## `null` 和 `undefined` 类型
 
 建议开启 `--strictNullChecks` 选项，并在代码里处理 `null` 的情形：
 
@@ -331,7 +332,7 @@ const anotherHundred: bigint = 100n;
 
 ### symbol
 
-`symbol`可以用来创建全局唯一的引用：
+`symbol` 可以用来创建全局唯一的引用：
 
 ```typescript
 const firstName = Symbol("name");
