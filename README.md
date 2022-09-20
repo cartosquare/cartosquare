@@ -3,6 +3,7 @@
 - 🌱 I’m currently learning rust :)
 - 📫 How to reach me : mothsmap@gmail.com
 - :pencil: Blog: www.cartosquare.com
+- :mountain_bicyclist: :swimmer: 
 
 <!---
 cartosquare/cartosquare is a ✨ special ✨ repository because its `README.md` (this file) appears on your GitHub profile.
