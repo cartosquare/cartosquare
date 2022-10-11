@@ -7,7 +7,7 @@ published: true
 
 ## Automake工具通常的执行流程
 
-当我们下载下来一个使用automake作为编译系统的源代码时，编译和安装的流程通常如下：
+当我们下载下来一个使用automake作为编译系统的源代码包时，编译和安装的流程通常如下：
 
 ```bash
 $ tar zxf package-version.tar.gz
@@ -49,17 +49,17 @@ $ make install
 
 ### 常见的预定义目录
 
-* prefix          /usr/local
-* exec_prefix     ${prefix}
-* bindir          ${exec_prefix}/bin
-* libdir          ${exec_prefix}/lib
+* prefix          `/usr/local`
+* exec_prefix     `${prefix}`
+* bindir          `${exec_prefix}/bin`
+* libdir          `${exec_prefix}/lib`
 * ...
-* includedir      ${prefix}/include
-* datarootdir     ${prefix}/share
-* datadir         ${datarootdir}
-* mandir          ${datarootdir}/man
-* infodir         ${datarootdir}/info
-* docdir          ${datarootdir}/doc/${PACKAGE}
+* includedir      `${prefix}/include`
+* datarootdir     `${prefix}/share`
+* datadir         `${datarootdir}`
+* mandir          `${datarootdir}/man`
+* infodir         `${datarootdir}/info`
+* docdir          `${datarootdir}/doc/${PACKAGE}`
 
 configure时可以改变这些目录的默认值。
 
@@ -106,9 +106,10 @@ main (void)
   return 0;
 }
 ```
-这里用到的config.h文件时autoconfig自动生成的，包含了一系列宏定义。代码中使用到了一个：PACKAGE_STRING
+这里用到的config.h文件是Autoconfig自动生成的，包含了一系列宏定义。main.c中使用到了一个：PACKAGE_STRING —— 代码库名称。
 
 * README
+
 ```
 $ cat README
 This is a demonstration package for GNU Automake.
@@ -116,6 +117,8 @@ Type 'info Automake' to read the Automake manual.
 ```
 
 * Makefile.am 和 src/Makefile.am
+
+在Aotoconfig中，我们不亲自写Makefile文件，而是通过Makefile.am文件来自动生成Makefile文件。
 
 ```
 $ cat src/Makefile.am
@@ -140,6 +143,9 @@ Makefile.am的语法和Makefile的语法是一致的。
 `dist_doc_DATA`变量中的doc指定README文件被安装在`docdir`，dist指定安装的时候也需要把README打包在内。
 
 * configure.ac
+
+configure.ac文件用来自动生成configure文件。
+
 ```
 $ cat configure.ac
 AC_INIT([amhello], [1.0], [bug-automake@gnu.org])
@@ -154,11 +160,17 @@ AC_OUTPUT
 ```
 
 以AC开头的指令是Autoconfig的宏。以AM开头的指令是Automake的宏。
+
 第一行初始化Autoconfig，设置了软件包的名称、版本号以及报告bug的邮箱地址；
+
 第二行初始化Automake，foreign参数表示改软件包不遵循GUN标准（没有ChangeLog等文件）。
+
 第三行AC_PROG_CC宏会搜索C编译器并设置CC变量。
+
 第四行AC_CONFIG_HEADERS([config.h])告诉configure命令创建config.h文件，该文件包含configure.ac定义的宏。比如AC_INIT就会定义一些宏变量
+
 AC_CONFIG_FILES宏列出了需要生成的Makefile文件，这些文件会使用Makefile.in来生成。
+
 AC_OUTPUT是结束命令，告诉Aotoconfig启动生成文件。
 
 ### 初始化编译系统
@@ -167,7 +179,7 @@ AC_OUTPUT是结束命令，告诉Aotoconfig启动生成文件。
 $ autoreconf --install
 ```
 
-这一步会生成configure、config.h.in,Makefile.in等文件。这一步之需要执行一次。
+这一步会生成configure、config.h.in,Makefile.in等文件。这一步只需要执行一次。
 
 ### 执行configure和make
 
