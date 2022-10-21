@@ -364,7 +364,7 @@ $(BITCOIN_GUI_BIN): FORCE
 
 在src/Makefile.am中，具体指定了每个目标的生成方式，下面具体看`bitcoind`和`bitcoind-cli`这两个目标：
 
-##### bitcoind
+##### bitcoind 生成配置
 
 ```bash
 if BUILD_BITCOIND
@@ -749,7 +749,7 @@ $(LIBSECP256K1): $(wildcard secp256k1/src/*.h) $(wildcard secp256k1/src/*.c) $(w
 
 见 Makefile.leveldb.include
 
-##### bitcoin-cli
+##### bitcoin-cli 生成配置
 
 ```
 if BUILD_BITCOIN_CLI
