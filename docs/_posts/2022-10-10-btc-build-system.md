@@ -18,7 +18,7 @@ $ make check
 $ make install
 ```
 
-### 下面是常见的make目标的解释
+### 下面是常见的make目标
 
 * make all
 编译可执行文件、库文件、文档等（等同于make）
@@ -30,7 +30,7 @@ $ make install
 与make install相同，同时去除debug信息
 
 * make uninstall
-与make install的做用相反
+与make install的作用相反
 
 * make clean
 删除make命令生成的文件
@@ -244,7 +244,7 @@ This is amhello 1.0.
 - README.md
 ```
 
-### configure.ac
+### 编译配置
 
 #### 1. 初始化Autoconfig
 ```
@@ -273,7 +273,9 @@ AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIR([build-aux/m4])
 ```
 
-#### 2. 编译目标名称设置
+#### 2. 编译目标
+
+configure.ac 中定义了最终生成目标的名称：
 
 ```
 BITCOIN_DAEMON_NAME=bitcoind
@@ -289,46 +291,51 @@ BITCOIN_MP_NODE_NAME=bitcoin-node
 BITCOIN_MP_GUI_NAME=bitcoin-gui
 ```
 
-#### 3. 初始化 Automake
+不同目标的作用如下：
+
+| Name                     | Description |
+|--------------------------|-------------|
+| *bitcoind* | RPC 服务端 |
+| *bitcoin-qt* | 客户端+服务端 |
+| *bitcoin-cli* | RPC客户端 |
+| *bitcoin-tx* | transaction工具 |
+| *bitcoin-wallet* | wallet 工具 |
+| *bitcoin-util* | util 工具 |
+| *bitcoin-chainstate* | chainstate 工具|
+| *test-bitcoin* | 单元测试 |
+| *bitcoin-node* | bitcoind的多进程版本 |
+| *bitcoin-gui* | bitcoin-qt的多进程版本 |
+
+
+这些目标通过AC_SUBST导出到makefile.in中：
 
 ```
-AM_INIT_AUTOMAKE([1.13 no-define subdir-objects foreign])
-
-AM_MAINTAINER_MODE([enable])
-
-dnl make the compilation flags quiet unless V=1 is used
-AM_SILENT_RULES([yes])
-
-dnl Compiler checks (here before libtool).
-if test "${CXXFLAGS+set}" = "set"; then
-  CXXFLAGS_overridden=yes
-else
-  CXXFLAGS_overridden=no
-fi
-AC_PROG_CXX
+AC_SUBST(BITCOIN_DAEMON_NAME)
+AC_SUBST(BITCOIN_GUI_NAME)
+AC_SUBST(BITCOIN_TEST_NAME)
+AC_SUBST(BITCOIN_CLI_NAME)
+AC_SUBST(BITCOIN_TX_NAME)
+AC_SUBST(BITCOIN_UTIL_NAME)
+AC_SUBST(BITCOIN_CHAINSTATE_NAME)
+AC_SUBST(BITCOIN_WALLET_TOOL_NAME)
+AC_SUBST(BITCOIN_MP_NODE_NAME)
+AC_SUBST(BITCOIN_MP_GUI_NAME)
 ```
 
-#### 4. configure 可选参数设置
-
-使用 AC_ARG_WITH 和 AC_ARG_ENABLE 宏
-
-#### 5. 导出变量到Makefile.in
-
-使用 AC_SUBST
-
-#### 5. 打印 configure 结果
-
-### Makefile.am
-
-#### 1. 指定子目录
+根目录的makefile.ac 将这些目标的生成工作交到src目录下的Makefile.ac中：
 
 ```
-SUBDIRS = src
-```
+BITCOIND_BIN=$(top_builddir)/src/$(BITCOIN_DAEMON_NAME)$(EXEEXT)
+BITCOIN_QT_BIN=$(top_builddir)/src/qt/$(BITCOIN_GUI_NAME)$(EXEEXT)
+BITCOIN_TEST_BIN=$(top_builddir)/src/test/$(BITCOIN_TEST_NAME)$(EXEEXT)
+BITCOIN_CLI_BIN=$(top_builddir)/src/$(BITCOIN_CLI_NAME)$(EXEEXT)
+BITCOIN_TX_BIN=$(top_builddir)/src/$(BITCOIN_TX_NAME)$(EXEEXT)
+BITCOIN_UTIL_BIN=$(top_builddir)/src/$(BITCOIN_UTIL_NAME)$(EXEEXT)
+BITCOIN_WALLET_BIN=$(top_builddir)/src/$(BITCOIN_WALLET_TOOL_NAME)$(EXEEXT)
+BITCOIN_NODE_BIN=$(top_builddir)/src/$(BITCOIN_MP_NODE_NAME)$(EXEEXT)
+BITCOIN_GUI_BIN=$(top_builddir)/src/$(BITCOIN_MP_GUI_NAME)$(EXEEXT)
+BITCOIN_WIN_INSTALLER=$(PACKAGE)-$(PACKAGE_VERSION)-win64-setup$(EXEEXT)
 
-#### 2. 可执行文件目标
-
-```
 $(BITCOIN_QT_BIN): FORCE
 	$(MAKE) -C src qt/$(@F)
 
@@ -354,53 +361,428 @@ $(BITCOIN_GUI_BIN): FORCE
 	$(MAKE) -C src $(@F)
 ```
 
-### src/Makefile.am
 
-指定静态库和可执行程序的源文件和编译选项。
+在src/Makefile.am中，具体指定了每个目标的生成方式，下面具体看`bitcoind`和`bitcoind-cli`这两个目标：
 
-#### 1. 静态库目标
+##### bitcoind
 
-```
-LIBBITCOIN_NODE=libbitcoin_node.a
-LIBBITCOIN_COMMON=libbitcoin_common.a
-LIBBITCOIN_CONSENSUS=libbitcoin_consensus.a
-LIBBITCOIN_CLI=libbitcoin_cli.a
-LIBBITCOIN_UTIL=libbitcoin_util.a
-LIBBITCOIN_CRYPTO_BASE=crypto/libbitcoin_crypto_base.la
-LIBBITCOINQT=qt/libbitcoinqt.a
-LIBSECP256K1=secp256k1/libsecp256k1.la
-```
-
-#### 2. 二进制目标
-
-```
+```bash
 if BUILD_BITCOIND
   bin_PROGRAMS += bitcoind
 endif
 
-if BUILD_BITCOIN_NODE
-  bin_PROGRAMS += bitcoin-node
+# bitcoind & bitcoin-node binaries #
+bitcoin_daemon_sources = bitcoind.cpp
+bitcoin_bin_cppflags = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES)
+bitcoin_bin_cxxflags = $(AM_CXXFLAGS) $(PIE_FLAGS)
+bitcoin_bin_ldflags = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) $(PTHREAD_FLAGS)
+
+if TARGET_WINDOWS
+bitcoin_daemon_sources += bitcoind-res.rc
 endif
 
+bitcoin_bin_ldadd = \
+  $(LIBBITCOIN_WALLET) \
+  $(LIBBITCOIN_COMMON) \
+  $(LIBBITCOIN_UTIL) \
+  $(LIBUNIVALUE) \
+  $(LIBBITCOIN_ZMQ) \
+  $(LIBBITCOIN_CONSENSUS) \
+  $(LIBBITCOIN_CRYPTO) \
+  $(LIBLEVELDB) \
+  $(LIBMEMENV) \
+  $(LIBSECP256K1)
+
+bitcoin_bin_ldadd += $(BDB_LIBS) $(MINIUPNPC_LIBS) $(NATPMP_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(ZMQ_LIBS) $(SQLITE_LIBS)
+
+bitcoind_SOURCES = $(bitcoin_daemon_sources) init/bitcoind.cpp
+bitcoind_CPPFLAGS = $(bitcoin_bin_cppflags)
+bitcoind_CXXFLAGS = $(bitcoin_bin_cxxflags)
+bitcoind_LDFLAGS = $(bitcoin_bin_ldflags)
+bitcoind_LDADD = $(LIBBITCOIN_NODE) $(bitcoin_bin_ldadd)
+```
+可以看出，bitcoind依赖`LIBBITCOIN_WALLET`, `LIBBITCOIN_COMMON`, `LIBBITCOIN_UTIL`, `LIBUNIVALUE`, `LIBBITCOIN_ZMQ`, `LIBBITCOIN_CONSENSUS`, `LIBBITCOIN_CRYPTO`, `LIBMEMENV`, `LIBSECP256K1`.
+
+* LIBBITCOIN_WALLET 生成配置
+```bash
+if ENABLE_WALLET
+LIBBITCOIN_WALLET=libbitcoin_wallet.a
+LIBBITCOIN_WALLET_TOOL=libbitcoin_wallet_tool.a
+endif
+
+
+# wallet: shared between bitcoind and bitcoin-qt, but only linked
+# when wallet enabled
+libbitcoin_wallet_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES) $(BDB_CPPFLAGS) $(SQLITE_CFLAGS)
+libbitcoin_wallet_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
+libbitcoin_wallet_a_SOURCES = \
+  wallet/coincontrol.cpp \
+  wallet/context.cpp \
+  wallet/crypter.cpp \
+  wallet/db.cpp \
+  wallet/dump.cpp \
+  wallet/external_signer_scriptpubkeyman.cpp \
+  wallet/feebumper.cpp \
+  wallet/fees.cpp \
+  wallet/interfaces.cpp \
+  wallet/load.cpp \
+  wallet/receive.cpp \
+  wallet/rpc/addresses.cpp \
+  wallet/rpc/backup.cpp \
+  wallet/rpc/coins.cpp \
+  wallet/rpc/encrypt.cpp \
+  wallet/rpc/spend.cpp \
+  wallet/rpc/signmessage.cpp \
+  wallet/rpc/transactions.cpp \
+  wallet/rpc/util.cpp \
+  wallet/rpc/wallet.cpp \
+  wallet/scriptpubkeyman.cpp \
+  wallet/spend.cpp \
+  wallet/transaction.cpp \
+  wallet/wallet.cpp \
+  wallet/walletdb.cpp \
+  wallet/walletutil.cpp \
+  wallet/coinselection.cpp \
+  $(BITCOIN_CORE_H)
+
+if USE_SQLITE
+libbitcoin_wallet_a_SOURCES += wallet/sqlite.cpp
+endif
+if USE_BDB
+libbitcoin_wallet_a_SOURCES += wallet/bdb.cpp wallet/salvage.cpp
+endif
+
+libbitcoin_wallet_tool_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES)
+libbitcoin_wallet_tool_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
+libbitcoin_wallet_tool_a_SOURCES = \
+  wallet/wallettool.cpp \
+  $(BITCOIN_CORE_H)
+```
+上面其实有生成libbitcoin_wallet.a和libbitcoin_wallet_tool.a两个库，后者是被bitcoin-wallet依赖的：
+
+```bash
+
+# bitcoin-wallet binary #
+bitcoin_wallet_SOURCES = bitcoin-wallet.cpp
+bitcoin_wallet_SOURCES += init/bitcoin-wallet.cpp
+bitcoin_wallet_CPPFLAGS = $(bitcoin_bin_cppflags)
+bitcoin_wallet_CXXFLAGS = $(bitcoin_bin_cxxflags)
+bitcoin_wallet_LDFLAGS = $(bitcoin_bin_ldflags)
+bitcoin_wallet_LDADD = \
+  $(LIBBITCOIN_WALLET_TOOL) \
+  $(LIBBITCOIN_WALLET) \
+  $(LIBBITCOIN_COMMON) \
+  $(LIBBITCOIN_UTIL) \
+  $(LIBUNIVALUE) \
+  $(LIBBITCOIN_CONSENSUS) \
+  $(LIBBITCOIN_CRYPTO) \
+  $(LIBSECP256K1) \
+  $(BDB_LIBS) \
+  $(SQLITE_LIBS)
+```
+
+* LIBBITCOIN_COMMON 生成配置
+
+```bash
+LIBBITCOIN_COMMON=libbitcoin_common.a
+# common: shared between bitcoind, and bitcoin-qt and non-server tools
+libbitcoin_common_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES)
+libbitcoin_common_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
+libbitcoin_common_a_SOURCES = \
+  base58.cpp \
+  bech32.cpp \
+  chainparams.cpp \
+  coins.cpp \
+  common/bloom.cpp \
+  compressor.cpp \
+  core_read.cpp \
+  core_write.cpp \
+  deploymentinfo.cpp \
+  external_signer.cpp \
+  init/common.cpp \
+  key.cpp \
+  key_io.cpp \
+  merkleblock.cpp \
+  net_types.cpp \
+  netaddress.cpp \
+  netbase.cpp \
+  net_permissions.cpp \
+  outputtype.cpp \
+  policy/feerate.cpp \
+  policy/policy.cpp \
+  protocol.cpp \
+  psbt.cpp \
+  rpc/rawtransaction_util.cpp \
+  rpc/external_signer.cpp \
+  rpc/util.cpp \
+  scheduler.cpp \
+  script/descriptor.cpp \
+  script/miniscript.cpp \
+  script/sign.cpp \
+  script/signingprovider.cpp \
+  script/standard.cpp \
+  warnings.cpp \
+  $(BITCOIN_CORE_H)
+```
+
+* LIBBITCOIN_UTIL 生成配置
+
+```bash
+LIBBITCOIN_UTIL=libbitcoin_util.a
+
+# util: shared between all executables.
+libbitcoin_util_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES)
+libbitcoin_util_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
+libbitcoin_util_a_SOURCES = \
+  support/lockedpool.cpp \
+  chainparamsbase.cpp \
+  clientversion.cpp \
+  fs.cpp \
+  interfaces/echo.cpp \
+  interfaces/handler.cpp \
+  interfaces/init.cpp \
+  logging.cpp \
+  random.cpp \
+  randomenv.cpp \
+  rpc/request.cpp \
+  support/cleanse.cpp \
+  sync.cpp \
+  threadinterrupt.cpp \
+  util/asmap.cpp \
+  util/bip32.cpp \
+  util/bytevectorhash.cpp \
+  util/check.cpp \
+  util/error.cpp \
+  util/fees.cpp \
+  util/getuniquepath.cpp \
+  util/hasher.cpp \
+  util/sock.cpp \
+  util/syserror.cpp \
+  util/system.cpp \
+  util/message.cpp \
+  util/moneystr.cpp \
+  util/rbf.cpp \
+  util/readwritefile.cpp \
+  util/settings.cpp \
+  util/thread.cpp \
+  util/threadnames.cpp \
+  util/serfloat.cpp \
+  util/spanparsing.cpp \
+  util/strencodings.cpp \
+  util/string.cpp \
+  util/syscall_sandbox.cpp \
+  util/time.cpp \
+  util/tokenpipe.cpp \
+  $(BITCOIN_CORE_H)
+
+if USE_LIBEVENT
+libbitcoin_util_a_SOURCES += util/url.cpp
+endif
+```
+* `LIBUNIVALUE`
+见 src/makefile.univalue.include
+
+* `LIBBITCOIN_ZMQ`
+
+```bash
+if ENABLE_ZMQ
+libbitcoin_zmq_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES) $(ZMQ_CFLAGS)
+libbitcoin_zmq_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
+libbitcoin_zmq_a_SOURCES = \
+  zmq/zmqabstractnotifier.cpp \
+  zmq/zmqnotificationinterface.cpp \
+  zmq/zmqpublishnotifier.cpp \
+  zmq/zmqrpc.cpp \
+  zmq/zmqutil.cpp
+endif
+```
+
+* `LIBBITCOIN_CONSENSUS`
+
+```bash
+
+# consensus: shared between all executables that validate any consensus rules.
+libbitcoin_consensus_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES)
+libbitcoin_consensus_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
+libbitcoin_consensus_a_SOURCES = \
+  arith_uint256.cpp \
+  arith_uint256.h \
+  consensus/amount.h \
+  consensus/merkle.cpp \
+  consensus/merkle.h \
+  consensus/params.h \
+  consensus/tx_check.cpp \
+  consensus/validation.h \
+  hash.cpp \
+  hash.h \
+  prevector.h \
+  primitives/block.cpp \
+  primitives/block.h \
+  primitives/transaction.cpp \
+  primitives/transaction.h \
+  pubkey.cpp \
+  pubkey.h \
+  script/bitcoinconsensus.cpp \
+  script/interpreter.cpp \
+  script/interpreter.h \
+  script/script.cpp \
+  script/script.h \
+  script/script_error.cpp \
+  script/script_error.h \
+  serialize.h \
+  span.h \
+  tinyformat.h \
+  uint256.cpp \
+  uint256.h \
+  util/strencodings.cpp \
+  util/strencodings.h \
+  version.h
+```
+
+* `LIBBITCOIN_CRYPTO`,`LIBSECP256K1`
+
+```bash
+
+# crypto primitives library
+crypto_libbitcoin_crypto_base_la_CPPFLAGS = $(AM_CPPFLAGS)
+
+# Specify -static in both CXXFLAGS and LDFLAGS so libtool will only build a
+# static version of this library. We don't need a dynamic version, and a dynamic
+# version can't be used on windows anyway because the library doesn't currently
+# export DLL symbols.
+crypto_libbitcoin_crypto_base_la_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS) -static
+crypto_libbitcoin_crypto_base_la_LDFLAGS = $(AM_LDFLAGS) -static
+
+crypto_libbitcoin_crypto_base_la_SOURCES = \
+  crypto/aes.cpp \
+  crypto/aes.h \
+  crypto/chacha_poly_aead.h \
+  crypto/chacha_poly_aead.cpp \
+  crypto/chacha20.h \
+  crypto/chacha20.cpp \
+  crypto/common.h \
+  crypto/hkdf_sha256_32.cpp \
+  crypto/hkdf_sha256_32.h \
+  crypto/hmac_sha256.cpp \
+  crypto/hmac_sha256.h \
+  crypto/hmac_sha512.cpp \
+  crypto/hmac_sha512.h \
+  crypto/poly1305.h \
+  crypto/poly1305.cpp \
+  crypto/muhash.h \
+  crypto/muhash.cpp \
+  crypto/ripemd160.cpp \
+  crypto/ripemd160.h \
+  crypto/sha1.cpp \
+  crypto/sha1.h \
+  crypto/sha256.cpp \
+  crypto/sha256.h \
+  crypto/sha3.cpp \
+  crypto/sha3.h \
+  crypto/sha512.cpp \
+  crypto/sha512.h \
+  crypto/siphash.cpp \
+  crypto/siphash.h
+
+if USE_ASM
+crypto_libbitcoin_crypto_base_la_SOURCES += crypto/sha256_sse4.cpp
+endif
+
+# See explanation for -static in crypto_libbitcoin_crypto_base_la's LDFLAGS and
+# CXXFLAGS above
+crypto_libbitcoin_crypto_sse41_la_LDFLAGS = $(AM_LDFLAGS) -static
+crypto_libbitcoin_crypto_sse41_la_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS) -static
+crypto_libbitcoin_crypto_sse41_la_CPPFLAGS = $(AM_CPPFLAGS)
+crypto_libbitcoin_crypto_sse41_la_CXXFLAGS += $(SSE41_CXXFLAGS)
+crypto_libbitcoin_crypto_sse41_la_CPPFLAGS += -DENABLE_SSE41
+crypto_libbitcoin_crypto_sse41_la_SOURCES = crypto/sha256_sse41.cpp
+
+# See explanation for -static in crypto_libbitcoin_crypto_base_la's LDFLAGS and
+# CXXFLAGS above
+crypto_libbitcoin_crypto_avx2_la_LDFLAGS = $(AM_LDFLAGS) -static
+crypto_libbitcoin_crypto_avx2_la_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS) -static
+crypto_libbitcoin_crypto_avx2_la_CPPFLAGS = $(AM_CPPFLAGS)
+crypto_libbitcoin_crypto_avx2_la_CXXFLAGS += $(AVX2_CXXFLAGS)
+crypto_libbitcoin_crypto_avx2_la_CPPFLAGS += -DENABLE_AVX2
+crypto_libbitcoin_crypto_avx2_la_SOURCES = crypto/sha256_avx2.cpp
+
+# See explanation for -static in crypto_libbitcoin_crypto_base_la's LDFLAGS and
+# CXXFLAGS above
+crypto_libbitcoin_crypto_x86_shani_la_LDFLAGS = $(AM_LDFLAGS) -static
+crypto_libbitcoin_crypto_x86_shani_la_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS) -static
+crypto_libbitcoin_crypto_x86_shani_la_CPPFLAGS = $(AM_CPPFLAGS)
+crypto_libbitcoin_crypto_x86_shani_la_CXXFLAGS += $(X86_SHANI_CXXFLAGS)
+crypto_libbitcoin_crypto_x86_shani_la_CPPFLAGS += -DENABLE_X86_SHANI
+crypto_libbitcoin_crypto_x86_shani_la_SOURCES = crypto/sha256_x86_shani.cpp
+
+# See explanation for -static in crypto_libbitcoin_crypto_base_la's LDFLAGS and
+# CXXFLAGS above
+crypto_libbitcoin_crypto_arm_shani_la_LDFLAGS = $(AM_LDFLAGS) -static
+crypto_libbitcoin_crypto_arm_shani_la_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS) -static
+crypto_libbitcoin_crypto_arm_shani_la_CPPFLAGS = $(AM_CPPFLAGS)
+crypto_libbitcoin_crypto_arm_shani_la_CXXFLAGS += $(ARM_SHANI_CXXFLAGS)
+crypto_libbitcoin_crypto_arm_shani_la_CPPFLAGS += -DENABLE_ARM_SHANI
+crypto_libbitcoin_crypto_arm_shani_la_SOURCES = crypto/sha256_arm_shani.cpp
+
+LIBBITCOIN_CRYPTO = $(LIBBITCOIN_CRYPTO_BASE)
+if ENABLE_SSE41
+LIBBITCOIN_CRYPTO_SSE41 = crypto/libbitcoin_crypto_sse41.la
+LIBBITCOIN_CRYPTO += $(LIBBITCOIN_CRYPTO_SSE41)
+endif
+if ENABLE_AVX2
+LIBBITCOIN_CRYPTO_AVX2 = crypto/libbitcoin_crypto_avx2.la
+LIBBITCOIN_CRYPTO += $(LIBBITCOIN_CRYPTO_AVX2)
+endif
+if ENABLE_X86_SHANI
+LIBBITCOIN_CRYPTO_X86_SHANI = crypto/libbitcoin_crypto_x86_shani.la
+LIBBITCOIN_CRYPTO += $(LIBBITCOIN_CRYPTO_X86_SHANI)
+endif
+if ENABLE_ARM_SHANI
+LIBBITCOIN_CRYPTO_ARM_SHANI = crypto/libbitcoin_crypto_arm_shani.la
+LIBBITCOIN_CRYPTO += $(LIBBITCOIN_CRYPTO_ARM_SHANI)
+endif
+noinst_LTLIBRARIES += $(LIBBITCOIN_CRYPTO)
+
+$(LIBSECP256K1): $(wildcard secp256k1/src/*.h) $(wildcard secp256k1/src/*.c) $(wildcard secp256k1/include/*)
+	$(AM_V_at)$(MAKE) $(AM_MAKEFLAGS) -C $(@D) $(@F)
+```
+* `LIBMEMENV`
+
+见 Makefile.leveldb.include
+
+##### bitcoin-cli
+
+```
 if BUILD_BITCOIN_CLI
   bin_PROGRAMS += bitcoin-cli
 endif
 
-if BUILD_BITCOIN_TX
-  bin_PROGRAMS += bitcoin-tx
+
+# cli: shared between bitcoin-cli and bitcoin-qt
+libbitcoin_cli_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES)
+libbitcoin_cli_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
+libbitcoin_cli_a_SOURCES = \
+  compat/stdin.h \
+  compat/stdin.cpp \
+  rpc/client.cpp \
+  $(BITCOIN_CORE_H)
+
+
+# bitcoin-cli binary #
+bitcoin_cli_SOURCES = bitcoin-cli.cpp
+bitcoin_cli_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES) $(EVENT_CFLAGS)
+bitcoin_cli_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
+bitcoin_cli_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) $(PTHREAD_FLAGS)
+
+if TARGET_WINDOWS
+bitcoin_cli_SOURCES += bitcoin-cli-res.rc
 endif
 
-if ENABLE_WALLET
-if BUILD_BITCOIN_WALLET
-  bin_PROGRAMS += bitcoin-wallet
-endif
-endif
+bitcoin_cli_LDADD = \
+  $(LIBBITCOIN_CLI) \
+  $(LIBUNIVALUE) \
+  $(LIBBITCOIN_UTIL) \
+  $(LIBBITCOIN_CRYPTO)
 
-if BUILD_BITCOIN_UTIL
-  bin_PROGRAMS += bitcoin-util
-endif
-
-if BUILD_BITCOIN_CHAINSTATE
-  bin_PROGRAMS += bitcoin-chainstate
-endif
+bitcoin_cli_LDADD += $(EVENT_LIBS)
 ```
