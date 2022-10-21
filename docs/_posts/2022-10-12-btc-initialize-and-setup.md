@@ -53,7 +53,7 @@ ArgsManager& args = *Assert(node.args);
 SetupServerArgs(args);
 ```
 
-这里除了创建命令行参数外，还创建不同的了`CChainParam`（main, test,reg）。
+这里除了创建命令行参数外，还创建不同的了`CChainParam`(main, test, reg)。
 
 * 解析命令行参数
 
@@ -63,11 +63,9 @@ SetupServerArgs(args);
         return InitError(Untranslated(strprintf("Error parsing command line arguments: %s\n", error)));
     }
 ```
-把命令行参数读入ArgsManager中的m_settings.command_line_optionsz和m_command成员变量中中。
+把命令行参数读入`ArgsManager`中的`m_settings.command_line_options`和`m_command`成员变量中。
 
-* 处理help和version命令
-
-略
+* 处理`help`和`version`命令
 
 * 检查数据目录参数
 
@@ -157,6 +155,7 @@ InitParameterInteraction(args);
         errors += strprintf(_("Config setting for %s only applied on %s network when in [%s] section.") + Untranslated("\n"), arg, network, network);
     }
 ```
+
 2. 检查配置文件中是否存在不认识的section
 
 ```c++
@@ -164,6 +163,7 @@ InitParameterInteraction(args);
         warnings += strprintf(Untranslated("%s:%i ") + _("Section [%s] is not recognized.") + Untranslated("\n"), section.m_file, section.m_line, section.m_name);
     }
 ```
+
 3. 检查block directory是否是目录
 
 ```c++
@@ -206,7 +206,7 @@ InitParameterInteraction(args);
     if (args.GetBoolArg("-forcednsseed", DEFAULT_FORCEDNSSEED) && !args.GetBoolArg("-dnsseed", DEFAULT_DNSSEED)){
         return InitError(_("Cannot set -forcednsseed to true when setting -dnsseed to false."));
     }
-···
+```
 
 8. 检查-bind -whitebind 和 -listen是否有冲突
 
@@ -246,7 +246,6 @@ InitParameterInteraction(args);
 
 ```c++
     hashAssumeValid = uint256S(args.GetArg("-assumevalid", chainparams.GetConsensus().defaultAssumeValid.GetHex()));
-
 ```
 
 * `nMinimumChainWork`: 正确链需要的最小工作量
@@ -268,7 +267,6 @@ InitParameterInteraction(args);
 
 * `nConnectTimeout` 连接超时; `peer_connect_timeout`： 节点连接超时
 * `nBytesPerSigOp`: Equivalent bytes per sigop in transactions for relay and mining
-* 
 
 * Improve TODO: 下面这几个参数需要健全性检查，需要移到单独的函数中检查，最好在[Step 2: 参数校验](AppInitParameterInteraction) 之前？
 
@@ -300,6 +298,11 @@ InitParameterInteraction(args);
                   "from a different location, it will be unable to locate the current data files. There could "
                   "also be data loss if bitcoin is started while in a temporary directory.\n",
                   args.GetArg("-datadir", ""), fs::PathToString(fs::current_path()));
+    }
+```
+```c++
+    if (!fs::is_directory(gArgs.GetBlocksDirPath())) {
+        return InitError(strprintf(_("Specified blocks directory \"%s\" does not exist."), args.GetArg("-blocksdir", "")));
     }
 ```
 ## Step 4/4a: 应用程序初始化
