@@ -404,6 +404,7 @@ bitcoind_LDADD = $(LIBBITCOIN_NODE) $(bitcoin_bin_ldadd)
 可以看出，bitcoind依赖`LIBBITCOIN_WALLET`, `LIBBITCOIN_COMMON`, `LIBBITCOIN_UTIL`, `LIBUNIVALUE`, `LIBBITCOIN_ZMQ`, `LIBBITCOIN_CONSENSUS`, `LIBBITCOIN_CRYPTO`, `LIBMEMENV`, `LIBSECP256K1`.
 
 * LIBBITCOIN_WALLET 生成配置
+
 ```bash
 if ENABLE_WALLET
 LIBBITCOIN_WALLET=libbitcoin_wallet.a
@@ -461,7 +462,6 @@ libbitcoin_wallet_tool_a_SOURCES = \
 上面其实有生成libbitcoin_wallet.a和libbitcoin_wallet_tool.a两个库，后者是被bitcoin-wallet依赖的：
 
 ```bash
-
 # bitcoin-wallet binary #
 bitcoin_wallet_SOURCES = bitcoin-wallet.cpp
 bitcoin_wallet_SOURCES += init/bitcoin-wallet.cpp
@@ -580,6 +580,7 @@ libbitcoin_util_a_SOURCES += util/url.cpp
 endif
 ```
 * `LIBUNIVALUE`
+
 见 src/makefile.univalue.include
 
 * `LIBBITCOIN_ZMQ`
@@ -600,7 +601,6 @@ endif
 * `LIBBITCOIN_CONSENSUS`
 
 ```bash
-
 # consensus: shared between all executables that validate any consensus rules.
 libbitcoin_consensus_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES)
 libbitcoin_consensus_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
@@ -642,7 +642,6 @@ libbitcoin_consensus_a_SOURCES = \
 * `LIBBITCOIN_CRYPTO`,`LIBSECP256K1`
 
 ```bash
-
 # crypto primitives library
 crypto_libbitcoin_crypto_base_la_CPPFLAGS = $(AM_CPPFLAGS)
 
@@ -757,7 +756,6 @@ if BUILD_BITCOIN_CLI
   bin_PROGRAMS += bitcoin-cli
 endif
 
-
 # cli: shared between bitcoin-cli and bitcoin-qt
 libbitcoin_cli_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES)
 libbitcoin_cli_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
@@ -766,7 +764,6 @@ libbitcoin_cli_a_SOURCES = \
   compat/stdin.cpp \
   rpc/client.cpp \
   $(BITCOIN_CORE_H)
-
 
 # bitcoin-cli binary #
 bitcoin_cli_SOURCES = bitcoin-cli.cpp
