@@ -3,9 +3,10 @@ title: 比特币源码学习02-初始化
 published: true
 ---
 
-文中引用的代码基于v23.0版本。
+文中引用的代码基于`24.x`分支。
 
-`bitcoind.cpp`文件包含程序的入口：
+`src/bitcoind.cpp`文件包含程序的入口(line 259 - line 279)：
+
 
 ```c++
 // 自定义的宏，避免mingw-w64上的链接问题
@@ -36,7 +37,7 @@ MAIN_FUNCTION
 }
 ```
 
-可以看到, `AppInit`函数是程序的主体，这个函数在解析完命令行参数，读取配置文件之后，分成了12个步骤：
+可以看到, `AppInit`函数是程序的主体(line 112)，这个函数在解析完命令行参数，读取配置文件之后，分成了12个步骤：
 
 
 ## Step 1： 基本设置
@@ -144,7 +145,7 @@ InitParameterInteraction(args);
         }
 ```
 
-## Step 2: 参数校验
+## Step 2: 参数交互
 
 有些参数的设置依赖另一些参数，这个步骤主要是设置这些参数（注意到Step 1中也有部分的参数校验）。相关代码位于`AppInitParameterInteraction`函数内。
 
@@ -338,9 +339,9 @@ const CChainParams& chainparams = Params();
 * 创建pid文件
 * 开始logging
 
-* 缓存大小计算
+* 脚本验证缓存大小计算
 
-```
+```c++
     ValidationCacheSizes validation_cache_sizes{};
     ApplyArgsManOptions(args, validation_cache_sizes);
     if (!InitSignatureCache(validation_cache_sizes.signature_cache_bytes)
@@ -348,7 +349,6 @@ const CChainParams& chainparams = Params();
     {
         return InitError(strprintf(_("Unable to allocate memory for -maxsigcachesize: '%s' MiB"), args.GetIntArg("-maxsigcachesize", DEFAULT_MAX_SIG_CACHE_BYTES >> 20)));
     }
-
 ```
 
 * 启动脚本验证线程
@@ -372,6 +372,179 @@ const CChainParams& chainparams = Params();
         g_parallel_script_checks = true;
         StartScriptCheckWorkerThreads(script_threads);
     }
+```
+脚本验证，是由全局变量`scriptcheckqueue`启动的(validation.cpp, line 1886)：
+
+```c++
+static CCheckQueue<CScriptCheck> scriptcheckqueue(128);
+```
+`CScriptCheck` 是脚本验证的一个闭包表示；`CCheckQueue`是验证队列，储存等待进行的验证。
+
+* `CCheckQueue`
+
+`CCheckQueue`是一个模版类，模版参数需要提供一个operator()操作，返回bool，用来表示验证是否成功，具体验证逻辑后续文章再介绍。
+
+通常，有一个master线程会往CCheckQueue队列中批量推送验证，另外N-1个worker线程负责处理验证。当master线程结束推送后，会join worker pool。
+
+#### 成员变量
+
+| Name            | type         | Description |
+|-----------------|--------------|-------------|
+| m_mutex         |  Mutex       |  内部变量锁 |
+| m_worker_cv | std::condition_variable | 当没有任务时，worker线程会等待这个变量 |
+| m_master_cv | std::condition_variable | 当没有任务时，master线程会等待这个变量 |
+| queue | std::vector<T> | 任务队列（后进先出）|
+| nIdle | int | 空闲的线程数（包括master）|
+| nTotal | int | 线程总数（包括master）|
+| fAllOk | bool | 临时验证结果 |
+| nTodo | int | 剩余验证任务数 |
+| nBatchSize | unsigned int | 批量处理最大的大小，默认为128|
+| m_worker_threads | std::vector<std::thread> | worker线程 |
+| m_request_stop | bool | 停止处理flag |
+
+#### 成员函数
+
+##### `StartWorkerThreads` 创建worker线程池
+
+```c++
+    void StartWorkerThreads(const int threads_num) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        {
+            LOCK(m_mutex);
+            nIdle = 0;
+            nTotal = 0;
+            fAllOk = true;
+        }
+        assert(m_worker_threads.empty());
+        for (int n = 0; n < threads_num; ++n) {
+            m_worker_threads.emplace_back([this, n]() {
+                // 线程名称
+                util::ThreadRename(strprintf("scriptch.%i", n));
+                // 线程安全性设置
+                SetSyscallSandboxPolicy(SyscallSandboxPolicy::VALIDATION_SCRIPT_CHECK);
+                // 进入循环
+                Loop(false /* worker thread */);
+            });
+        }
+    }
+```
+worker线程创建后进入Loop循环，具体解释见代码：
+
+```c++
+    /** Internal function that does bulk of the verification work. */
+    bool Loop(bool fMaster) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        // 判断是master thread还是workerthread，选择对应的条件变量
+        std::condition_variable& cond = fMaster ? m_master_cv : m_worker_cv;
+        // 验证数组，从全局队列中拷贝过来
+        std::vector<T> vChecks;
+        vChecks.reserve(nBatchSize);
+        unsigned int nNow = 0;
+        bool fOk = true;
+        do { // 无限循环
+            {
+                // 分配验证任务时需锁住内部变量锁：m_mutex
+                WAIT_LOCK(m_mutex, lock);
+                // first do the clean-up of the previous loop run (allowing us to do it in the same critsect)
+                if (nNow) { // nNow表示上一个loop处理的任务数
+                    fAllOk &= fOk; // 更新全局的状态变量
+                    nTodo -= nNow; // 更新当前loop的剩余验证数
+                    if (nTodo == 0 && !fMaster)
+                        // We processed the last element; inform the master it can exit and return the result
+                        m_master_cv.notify_one();
+                } else {
+                    // first iteration
+                    // 说明这是当前线程的第一个loop循环
+                    nTotal++;
+                }
+                // logically, the do loop starts here
+                while (queue.empty() && !m_request_stop) {
+                    if (fMaster && nTodo == 0) {
+                        // master任务结束
+                        nTotal--;
+                        bool fRet = fAllOk;
+                        // reset the status for new work later
+                        fAllOk = true;
+                        // return the current status
+                        return fRet;
+                    }
+                    nIdle++;
+                    cond.wait(lock); // wait
+                    nIdle--;
+                }
+                if (m_request_stop) {
+                    return false;
+                }
+
+                // Decide how many work units to process now.
+                // * Do not try to do everything at once, but aim for increasingly smaller batches so
+                //   all workers finish approximately simultaneously.
+                // * Try to account for idle jobs which will instantly start helping.
+                // * Don't do batches smaller than 1 (duh), or larger than nBatchSize.
+                nNow = std::max(1U, std::min(nBatchSize, (unsigned int)queue.size() / (nTotal + nIdle + 1)));
+                vChecks.resize(nNow);
+                for (unsigned int i = 0; i < nNow; i++) {
+                    // We want the lock on the m_mutex to be as short as possible, so swap jobs from the global
+                    // queue to the local batch vector instead of copying.
+                    vChecks[i].swap(queue.back());
+                    queue.pop_back();
+                }
+                // Check whether we need to do work at all
+                fOk = fAllOk;
+            }
+            // execute work
+            for (T& check : vChecks)
+                if (fOk)
+                    fOk = check();
+            vChecks.clear();
+        } while (true);
+    }
+```
+
+#### master线程涉及到`Wait`、`Add`以及`StopWorkThreads`这几个操作，用来等待任务处理结束、添加任务以及终止worker线程。
+
+```c++
+//! Wait until execution finishes, and return whether all evaluations were successful.
+    bool Wait() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        return Loop(true /* master thread */);
+    }
+
+    //! Add a batch of checks to the queue
+    void Add(std::vector<T>& vChecks) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        if (vChecks.empty()) {
+            return;
+        }
+
+        {
+            LOCK(m_mutex);
+            for (T& check : vChecks) {
+                queue.emplace_back();
+                check.swap(queue.back());
+            }
+            nTodo += vChecks.size();
+        }
+
+        if (vChecks.size() == 1) {
+            m_worker_cv.notify_one();
+        } else {
+            m_worker_cv.notify_all();
+        }
+    }
+
+    //! Stop all of the worker threads.
+    void StopWorkerThreads() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
+    {
+        WITH_LOCK(m_mutex, m_request_stop = true);
+        m_worker_cv.notify_all();
+        for (std::thread& t : m_worker_threads) {
+            t.join();
+        }
+        m_worker_threads.clear();
+        WITH_LOCK(m_mutex, m_request_stop = false);
+    }
+
 ```
 
 * 启动轻量级的任务管理线程
