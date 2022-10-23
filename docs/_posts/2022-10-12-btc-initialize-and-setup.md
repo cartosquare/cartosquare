@@ -382,11 +382,11 @@ static CCheckQueue<CScriptCheck> scriptcheckqueue(128);
 
 * `CCheckQueue`
 
-`CCheckQueue`是一个模版类，模版参数需要提供一个operator()操作，返回bool，用来表示验证是否成功，具体验证逻辑后续文章再介绍。
+`CCheckQueue`是一个模版类，模版参数需要提供一个operator()操作，返回bool，用来表示验证是否成功，具体验证逻辑后续文章再介绍。下面介绍`CCheckQueue`的实现逻辑。
 
-通常，有一个master线程会往CCheckQueue队列中批量推送验证，另外N-1个worker线程负责处理验证。当master线程结束推送后，会join worker pool。
+通常，有一个master线程会往CCheckQueue的队列中批量推送验证，另外N-1个worker线程负责处理验证。当master线程结束推送后，会join worker pool。
 
-#### 成员变量
+### 成员变量
 
 | Name            | type         | Description |
 |-----------------|--------------|-------------|
@@ -396,15 +396,15 @@ static CCheckQueue<CScriptCheck> scriptcheckqueue(128);
 | queue | std::vector<T> | 任务队列（后进先出）|
 | nIdle | int | 空闲的线程数（包括master）|
 | nTotal | int | 线程总数（包括master）|
-| fAllOk | bool | 临时验证结果 |
+| fAllOk | bool | 截止到当前，验证是否都通过 |
 | nTodo | int | 剩余验证任务数 |
-| nBatchSize | unsigned int | 批量处理最大的大小，默认为128|
-| m_worker_threads | std::vector<std::thread> | worker线程 |
+| nBatchSize | unsigned int | 批量处理最大的大小，默认为128 |
+| m_worker_threads | std::vector<std::thread> | worker线程池 |
 | m_request_stop | bool | 停止处理flag |
 
-#### 成员函数
+### 成员函数
 
-##### `StartWorkerThreads` 创建worker线程池
+#### `StartWorkerThreads` 创建worker线程池
 
 ```c++
     void StartWorkerThreads(const int threads_num) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
@@ -562,6 +562,7 @@ worker线程创建后进入Loop循环，具体解释见代码：
 
     GetMainSignals().RegisterBackgroundSignalScheduler(*node.scheduler);
 ```
+这里创建了一个service线程(m_service_thread)用来执行定时或是周期性的任务。并且注册了一个周期性的任务：每分钟给随机系统获取一些熵。
 
 * 创建钱包界面（并没有加载钱包数据）
 ```c++
@@ -572,8 +573,9 @@ worker线程创建后进入Loop循环，具体解释见代码：
     g_wallet_init_interface.Construct(node);
     uiInterface.InitWallet();
 ```
+钱包界面创建的代码位于`src/walet/init.cpp`。最终的代码位于`src/wallet/interfaces.cpp`第524行的`WalletLoaderImpl`实现。
 
-* warmup模式启动rpc服务
+* warmup模式启动json-rpc服务
 
 ```c++
     /* Register RPC commands regardless of -server setting so they will be
@@ -597,6 +599,229 @@ worker线程创建后进入Loop循环，具体解释见代码：
         if (!AppInitServers(node))
             return InitError(_("Unable to start HTTP server. See debug log for details."));
     }
+```
+JSON-RPC是一个轻量级的远程函数调用（协议见https://www.jsonrpc.org/specification_v1）。两个节点建立连接后，可以通过该协议进行函数调用请求和回复。消息传递的协议可以是http。
+
+#### JSON-RPC实现
+`RegisterAllCoreRPCCommands`往`CRPCTable`中注册RPC命令，`CRPCTable`管理这所有的命令，并有一个成员函数可以执行命令：
+
+```c++
+UniValue CRPCTable::execute(const JSONRPCRequest &request) const
+{
+    // Return immediately if in warmup
+    {
+        LOCK(g_rpc_warmup_mutex);
+        if (fRPCInWarmup)
+            throw JSONRPCError(RPC_IN_WARMUP, rpcWarmupStatus);
+    }
+
+    // Find method
+    auto it = mapCommands.find(request.strMethod);
+    if (it != mapCommands.end()) {
+        UniValue result;
+        if (ExecuteCommands(it->second, request, result)) {
+            return result;
+        }
+    }
+    throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found");
+}
+```
+可以看到，执行命令是调用了`ExecuteCommands`函数：
+
+```c++
+static bool ExecuteCommand(const CRPCCommand& command, const JSONRPCRequest& request, UniValue& result, bool last_handler)
+{
+    try
+    {
+        RPCCommandExecution execution(request.strMethod);
+        // Execute, convert arguments to array if necessary
+        if (request.params.isObject()) {
+            return command.actor(transformNamedArguments(request, command.argNames), result, last_handler);
+        } else {
+            return command.actor(request, result, last_handler);
+        }
+    }
+    catch (const std::exception& e)
+    {
+        throw JSONRPCError(RPC_MISC_ERROR, e.what());
+    }
+}
+```
+
+而在`ExecuteCommand`中则是调用了`CRPCCommand`类中的`actor`，在注册命令的时候，需要将`actor`进行定义。下面是`CRPCCommand`的申明：
+
+```c++
+typedef RPCHelpMan (*RpcMethodFnType)();
+
+class CRPCCommand
+{
+public:
+    //! RPC method handler reading request and assigning result. Should return
+    //! true if request is fully handled, false if it should be passed on to
+    //! subsequent handlers.
+    using Actor = std::function<bool(const JSONRPCRequest& request, UniValue& result, bool last_handler)>;
+
+    //! Constructor taking Actor callback supporting multiple handlers.
+    CRPCCommand(std::string category, std::string name, Actor actor, std::vector<std::string> args, intptr_t unique_id)
+        : category(std::move(category)), name(std::move(name)), actor(std::move(actor)), argNames(std::move(args)),
+          unique_id(unique_id)
+    {
+    }
+
+    //! Simplified constructor taking plain RpcMethodFnType function pointer.
+    CRPCCommand(std::string category, RpcMethodFnType fn)
+        : CRPCCommand(
+              category,
+              fn().m_name,
+              [fn](const JSONRPCRequest& request, UniValue& result, bool) { result = fn().HandleRequest(request); return true; },
+              fn().GetArgNames(),
+              intptr_t(fn))
+    {
+    }
+
+    std::string category;
+    std::string name;
+    Actor actor;
+    std::vector<std::string> argNames;
+    intptr_t unique_id;
+};
+```
+可以看出，`Actor`其实调用的是`RPCHelpMan`类的`HandleRequest`函数。也就是说，创建`RPCCommand`的时候只需要指定`categary`以及`RPCHelpMan`（`RpcMethodFnType`）的实例。
+
+#### HTPP Server
+
+函数`AppInitServers`初始化并启动http服务：
+
+```c++
+static bool AppInitServers(NodeContext& node)
+{
+    const ArgsManager& args = *Assert(node.args);
+    //  服务启动事件
+    RPCServer::OnStarted(&OnRPCStarted);
+    // 服务关闭事件
+    RPCServer::OnStopped(&OnRPCStopped);
+    // 初始化http服务
+    if (!InitHTTPServer())
+        return false;
+    // RPC启动flag
+    StartRPC();
+    node.rpc_interruption_point = RpcInterruptionPoint;
+    // 注册RPC handle到http 服务中
+    if (!StartHTTPRPC(&node))
+        return false;
+    if (args.GetBoolArg("-rest", DEFAULT_REST_ENABLE)) StartREST(&node); // 连接 Rest handle
+    // 启动http服务
+    StartHTTPServer();
+    return true;
+}
+```
+bitcoind使用的是`libevent`作为事件分发处理以及http服务器。`InitHTTPServer`主要是进行`libevent`的设置(日志、多线程）以及创建相应的数据结构（event_base, evthttp），最后绑定ip地址和端口。
+
+`StartRPC`函数标记RPC服务已启动，并触发启动事件。
+
+`StartHTTPRPC`函数主要是注册RPC路由:
+
+```c++
+bool StartHTTPRPC(const std::any& context)
+{
+    LogPrint(BCLog::RPC, "Starting HTTP RPC server\n");
+    if (!InitRPCAuthentication())
+        return false;
+
+    auto handle_rpc = [context](HTTPRequest* req, const std::string&) { return HTTPReq_JSONRPC(context, req); };
+    RegisterHTTPHandler("/", true, handle_rpc);
+    if (g_wallet_init_interface.HasWalletSupport()) {
+        RegisterHTTPHandler("/wallet/", false, handle_rpc);
+    }
+    struct event_base* eventBase = EventBase();
+    assert(eventBase);
+    httpRPCTimerInterface = std::make_unique<HTTPRPCTimerInterface>(eventBase);
+    RPCSetTimerInterface(httpRPCTimerInterface.get());
+    return true;
+}
+```
+
+`StartREST`函数注册Rest api路由，注意到REST接口只有指定了-rest参数才有。
+
+`StartHTTPServer`函数正式启动http服务器。注意到，这个函数启动了一个`g_thread_http`线程作为`libevent`事件分发主线程，另外启动了`rpcThreads`个线程（`g_thread_http_workers`）作为http worker线程来响应http请求。之所以能做到多线程处理，是因为把请求都放到了一个`HTTPWorkQueue`中，每次work queue中添加一个工作项的时候，会通过条件变量通知其中一个线程，这个线程则会等待这个条件变量的通知，一旦有工作项，就会把该项出队列，并执行该项的工作：
+
+```c++
+/** HTTP request work item */
+class HTTPWorkItem final : public HTTPClosure
+{
+public:
+    HTTPWorkItem(std::unique_ptr<HTTPRequest> _req, const std::string &_path, const HTTPRequestHandler& _func):
+        req(std::move(_req)), path(_path), func(_func)
+    {
+    }
+    void operator()() override
+    {
+        func(req.get(), path);
+    }
+
+    std::unique_ptr<HTTPRequest> req;
+
+private:
+    std::string path;
+    HTTPRequestHandler func;
+};
+
+/** Simple work queue for distributing work over multiple threads.
+ * Work items are simply callable objects.
+ */
+template <typename WorkItem>
+class WorkQueue
+{
+private:
+    Mutex cs;
+    std::condition_variable cond GUARDED_BY(cs);
+    std::deque<std::unique_ptr<WorkItem>> queue GUARDED_BY(cs);
+    bool running GUARDED_BY(cs){true};
+    const size_t maxDepth;
+
+public:
+    explicit WorkQueue(size_t _maxDepth) : maxDepth(_maxDepth)
+    {
+    }
+    /** Precondition: worker threads have all stopped (they have been joined).
+     */
+    ~WorkQueue() = default;
+    /** Enqueue a work item */
+    bool Enqueue(WorkItem* item) EXCLUSIVE_LOCKS_REQUIRED(!cs)
+    {
+        LOCK(cs);
+        if (!running || queue.size() >= maxDepth) {
+            return false;
+        }
+        queue.emplace_back(std::unique_ptr<WorkItem>(item));
+        cond.notify_one();
+        return true;
+    }
+    /** Thread function */
+    void Run() EXCLUSIVE_LOCKS_REQUIRED(!cs)
+    {
+        while (true) {
+            std::unique_ptr<WorkItem> i;
+            {
+                WAIT_LOCK(cs, lock);
+                while (running && queue.empty())
+                    cond.wait(lock);
+                if (!running && queue.empty())
+                    break;
+                i = std::move(queue.front());
+                queue.pop_front();
+            }
+            (*i)();
+        }
+    }
+    /** Interrupt and exit loops */
+    void Interrupt() EXCLUSIVE_LOCKS_REQUIRED(!cs)
+    {
+        LOCK(cs);
+        running = false;
+        cond.notify_all();
+    }
+};
 ```
 
 ## Step 5: 验证钱包数据库的完整性
