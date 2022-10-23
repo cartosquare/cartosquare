@@ -9,11 +9,21 @@ published: true
 
 
 ```c++
-// 自定义的宏，避免mingw-w64上的链接问题
+#ifdef WIN32
+// Export main() and ensure working ASLR when using mingw-w64.
+// Exporting a symbol will prevent the linker from stripping
+// the .reloc section from the binary, which is a requirement
+// for ASLR. While release builds are not affected, anyone
+// building with a binutils < 2.36 is subject to this ld bug.
+#define MAIN_FUNCTION __declspec(dllexport) int main(int argc, char* argv[])
+#else
+#define MAIN_FUNCTION int main(int argc, char* argv[])
+#endif
+
 MAIN_FUNCTION
 {
 #ifdef WIN32
-    // windows 下特殊处理参数，转为utf16->utf8
+    // windows 下字符串特殊处理，utf16->utf8
     util::WinCmdLineArgs winArgs;
     std::tie(argc, argv) = winArgs.get();
 #endif
@@ -686,7 +696,7 @@ public:
     intptr_t unique_id;
 };
 ```
-可以看出，`Actor`其实调用的是`RPCHelpMan`类的`HandleRequest`函数。也就是说，创建`RPCCommand`的时候只需要指定`categary`以及`RPCHelpMan`（`RpcMethodFnType`）的实例。
+可以看出，`Actor`其实调用的是`RPCHelpMan`类的`HandleRequest`函数。也就是说，创建`RPCCommand`的时候只需要指定`category`以及`RPCHelpMan`（`RpcMethodFnType`）的实例。
 
 #### HTPP Server
 
