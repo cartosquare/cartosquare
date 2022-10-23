@@ -843,19 +843,294 @@ public:
         }
     }
 ```
+这一步主要是做钱包数据库的完整性检查。SQLite is required for the descriptor wallet；Berkeley DB is required for the legacy wallet.。
 
 ## Step 6: 网络初始化
 
-#### 解析asmap文件，如果需要
+这一步只是做初始化的工作，并没有打开网络连接，因为区块链的状态还没有初始化。
+
+* 解析asmap文件，如果需要
+
+asmap的解释见：
+
 https://blog.bitmex.com/call-to-action-testing-and-improving-asmap/
 
-#### 初始化netgroupman, addrman, banman, connman
-#### 初始化fee估计类
-#### 解析onlynet和dnsseed参数
-#### 解析dns参数
-#### 解析proxy
-#### 解析onion，判断是否使用tor
-#### 解析手动指定的外部ip
+* 初始化网络组管理`NetGroupManager`
+
+```c++
+node.netgroupman = std::make_unique<NetGroupManager>(std::move(asmap));
+```
+
+* 初始化地址管理 `AddrMan`
+
+```c++
+std::optional<bilingual_str> LoadAddrman(const NetGroupManager& netgroupman, const ArgsManager& args, std::unique_ptr<AddrMan>& addrman)
+{
+    auto check_addrman = std::clamp<int32_t>(args.GetIntArg("-checkaddrman", DEFAULT_ADDRMAN_CONSISTENCY_CHECKS), 0, 1000000);
+    addrman = std::make_unique<AddrMan>(netgroupman, /*deterministic=*/false, /*consistency_check_ratio=*/check_addrman);
+
+    int64_t nStart = GetTimeMillis();
+    const auto path_addr{args.GetDataDirNet() / "peers.dat"};
+    try {
+        DeserializeFileDB(path_addr, *addrman, CLIENT_VERSION);
+        LogPrintf("Loaded %i addresses from peers.dat  %dms\n", addrman->size(), GetTimeMillis() - nStart);
+    } catch (const DbNotFoundError&) {
+        // Addrman can be in an inconsistent state after failure, reset it
+        addrman = std::make_unique<AddrMan>(netgroupman, /*deterministic=*/false, /*consistency_check_ratio=*/check_addrman);
+        LogPrintf("Creating peers.dat because the file was not found (%s)\n", fs::quoted(fs::PathToString(path_addr)));
+        DumpPeerAddresses(args, *addrman);
+    } catch (const InvalidAddrManVersionError&) {
+        if (!RenameOver(path_addr, (fs::path)path_addr + ".bak")) {
+            addrman = nullptr;
+            return strprintf(_("Failed to rename invalid peers.dat file. Please move or delete it and try again."));
+        }
+        // Addrman can be in an inconsistent state after failure, reset it
+        addrman = std::make_unique<AddrMan>(netgroupman, /*deterministic=*/false, /*consistency_check_ratio=*/check_addrman);
+        LogPrintf("Creating new peers.dat because the file version was not compatible (%s). Original backed up to peers.dat.bak\n", fs::quoted(fs::PathToString(path_addr)));
+        DumpPeerAddresses(args, *addrman);
+    } catch (const std::exception& e) {
+        addrman = nullptr;
+        return strprintf(_("Invalid or corrupt peers.dat (%s). If you believe this is a bug, please report it to %s. As a workaround, you can move the file (%s) out of the way (rename, move, or delete) to have a new one created on the next start."),
+                         e.what(), PACKAGE_BUGREPORT, fs::quoted(fs::PathToString(path_addr)));
+    }
+    return std::nullopt;
+}
+```
+`AddrMan`是一个随机的地址管理类，管理着与节点相关的peers，随机的设置是为了防止网络攻击，下面是`src/addrman.h`中关于这个类的设计说明：
+
+```c++
+/** Stochastic address manager
+ *
+ * Design goals:
+ *  * Keep the address tables in-memory, and asynchronously dump the entire table to peers.dat.
+ *  * Make sure no (localized) attacker can fill the entire table with his nodes/addresses.
+ *
+ * To that end:
+ *  * Addresses are organized into buckets that can each store up to 64 entries.
+ *    * Addresses to which our node has not successfully connected go into 1024 "new" buckets.
+ *      * Based on the address range (/16 for IPv4) of the source of information, or if an asmap is provided,
+ *        the AS it belongs to (for IPv4/IPv6), 64 buckets are selected at random.
+ *      * The actual bucket is chosen from one of these, based on the range in which the address itself is located.
+ *      * The position in the bucket is chosen based on the full address.
+ *      * One single address can occur in up to 8 different buckets to increase selection chances for addresses that
+ *        are seen frequently. The chance for increasing this multiplicity decreases exponentially.
+ *      * When adding a new address to an occupied position of a bucket, it will not replace the existing entry
+ *        unless that address is also stored in another bucket or it doesn't meet one of several quality criteria
+ *        (see IsTerrible for exact criteria).
+ *    * Addresses of nodes that are known to be accessible go into 256 "tried" buckets.
+ *      * Each address range selects at random 8 of these buckets.
+ *      * The actual bucket is chosen from one of these, based on the full address.
+ *      * When adding a new good address to an occupied position of a bucket, a FEELER connection to the
+ *        old address is attempted. The old entry is only replaced and moved back to the "new" buckets if this
+ *        attempt was unsuccessful.
+ *    * Bucket selection is based on cryptographic hashing, using a randomly-generated 256-bit key, which should not
+ *      be observable by adversaries.
+ *    * Several indexes are kept for high performance. Setting m_consistency_check_ratio with the -checkaddrman
+ *      configuration option will introduce (expensive) consistency checks for the entire data structure.
+ */
+class AddrMan
+{
+protected:
+    const std::unique_ptr<AddrManImpl> m_impl;
+
+public:
+    explicit AddrMan(const NetGroupManager& netgroupman, bool deterministic, int32_t consistency_check_ratio);
+
+    ~AddrMan();
+
+    template <typename Stream>
+    void Serialize(Stream& s_) const;
+
+    template <typename Stream>
+    void Unserialize(Stream& s_);
+
+    //! Return the number of (unique) addresses in all tables.
+    size_t size() const;
+
+    /**
+     * Attempt to add one or more addresses to addrman's new table.
+     *
+     * @param[in] vAddr           Address records to attempt to add.
+     * @param[in] source          The address of the node that sent us these addr records.
+     * @param[in] time_penalty    A "time penalty" to apply to the address record's nTime. If a peer
+     *                            sends us an address record with nTime=n, then we'll add it to our
+     *                            addrman with nTime=(n - time_penalty).
+     * @return    true if at least one address is successfully added. */
+    bool Add(const std::vector<CAddress>& vAddr, const CNetAddr& source, std::chrono::seconds time_penalty = 0s);
+
+    /**
+     * Mark an address record as accessible and attempt to move it to addrman's tried table.
+     *
+     * @param[in] addr            Address record to attempt to move to tried table.
+     * @param[in] time            The time that we were last connected to this peer.
+     * @return    true if the address is successfully moved from the new table to the tried table.
+     */
+    bool Good(const CService& addr, NodeSeconds time = Now<NodeSeconds>());
+
+    //! Mark an entry as connection attempted to.
+    void Attempt(const CService& addr, bool fCountFailure, NodeSeconds time = Now<NodeSeconds>());
+
+    //! See if any to-be-evicted tried table entries have been tested and if so resolve the collisions.
+    void ResolveCollisions();
+
+    /**
+     * Randomly select an address in the tried table that another address is
+     * attempting to evict.
+     *
+     * @return CAddress The record for the selected tried peer.
+     *         seconds  The last time we attempted to connect to that peer.
+     */
+    std::pair<CAddress, NodeSeconds> SelectTriedCollision();
+
+    /**
+     * Choose an address to connect to.
+     *
+     * @param[in] newOnly  Whether to only select addresses from the new table.
+     * @return    CAddress The record for the selected peer.
+     *            seconds  The last time we attempted to connect to that peer.
+     */
+    std::pair<CAddress, NodeSeconds> Select(bool newOnly = false) const;
+
+    /**
+     * Return all or many randomly selected addresses, optionally by network.
+     *
+     * @param[in] max_addresses  Maximum number of addresses to return (0 = all).
+     * @param[in] max_pct        Maximum percentage of addresses to return (0 = all).
+     * @param[in] network        Select only addresses of this network (nullopt = all).
+     *
+     * @return                   A vector of randomly selected addresses from vRandom.
+     */
+    std::vector<CAddress> GetAddr(size_t max_addresses, size_t max_pct, std::optional<Network> network) const;
+
+    /** We have successfully connected to this peer. Calling this function
+     *  updates the CAddress's nTime, which is used in our IsTerrible()
+     *  decisions and gossiped to peers. Callers should be careful that updating
+     *  this information doesn't leak topology information to network spies.
+     *
+     *  net_processing calls this function when it *disconnects* from a peer to
+     *  not leak information about currently connected peers.
+     *
+     * @param[in]   addr     The address of the peer we were connected to
+     * @param[in]   time     The time that we were last connected to this peer
+     */
+    void Connected(const CService& addr, NodeSeconds time = Now<NodeSeconds>());
+
+    //! Update an entry's service bits.
+    void SetServices(const CService& addr, ServiceFlags nServices);
+
+    /** Test-only function
+     * Find the address record in AddrMan and return information about its
+     * position.
+     * @param[in] addr       The address record to look up.
+     * @return               Information about the address record in AddrMan
+     *                       or nullopt if address is not found.
+     */
+    std::optional<AddressPosition> FindAddressEntry(const CAddress& addr);
+};
+
+```
+
+* 初始化屏蔽地址管理`BanMan`
+
+```c++
+node.banman = std::make_unique<BanMan>(gArgs.GetDataDirNet() / "banlist", &uiInterface, args.GetIntArg("-bantime", DEFAULT_MISBEHAVING_BANTIME));
+```
+
+设计策略见`src/banman.h`:
+
+```c++
+// Banman manages two related but distinct concepts:
+//
+// 1. Banning. This is configured manually by the user, through the setban RPC.
+// If an address or subnet is banned, we never accept incoming connections from
+// it and never create outgoing connections to it. We won't gossip its address
+// to other peers in addr messages. Banned addresses and subnets are stored to
+// disk on shutdown and reloaded on startup. Banning can be used to
+// prevent connections with spy nodes or other griefers.
+//
+// 2. Discouragement. If a peer misbehaves enough (see Misbehaving() in
+// net_processing.cpp), we'll mark that address as discouraged. We still allow
+// incoming connections from them, but they're preferred for eviction when
+// we receive new incoming connections. We never make outgoing connections to
+// them, and do not gossip their address to other peers. This is implemented as
+// a bloom filter. We can (probabilistically) test for membership, but can't
+// list all discouraged addresses or unmark them as discouraged. Discouragement
+// can prevent our limited connection slots being used up by incompatible
+// or broken peers.
+//
+// Neither banning nor discouragement are protections against denial-of-service
+// attacks, since if an attacker has a way to waste our resources and we
+// disconnect from them and ban that address, it's trivial for them to
+// reconnect from another IP address.
+//
+// Attempting to automatically disconnect or ban any class of peer carries the
+// risk of splitting the network. For example, if we banned/disconnected for a
+// transaction that fails a policy check and a future version changes the
+// policy check so the transaction is accepted, then that transaction could
+// cause the network to split between old nodes and new nodes.
+```
+* 初始化连接管理`CConnman`
+`CConman`是最顶层的网络管理类，接受`Addrman`, `NetGroupMan`作为构造参数。
+
+* 初始化fee估计类`CBlockPolicyEstimator`
+`CBlockPolicyEstimator`的设计见：`src/policy/fees.h`:
+
+```c++
+/** \class CBlockPolicyEstimator
+ * The BlockPolicyEstimator is used for estimating the feerate needed
+ * for a transaction to be included in a block within a certain number of
+ * blocks.
+ *
+ * At a high level the algorithm works by grouping transactions into buckets
+ * based on having similar feerates and then tracking how long it
+ * takes transactions in the various buckets to be mined.  It operates under
+ * the assumption that in general transactions of higher feerate will be
+ * included in blocks before transactions of lower feerate.   So for
+ * example if you wanted to know what feerate you should put on a transaction to
+ * be included in a block within the next 5 blocks, you would start by looking
+ * at the bucket with the highest feerate transactions and verifying that a
+ * sufficiently high percentage of them were confirmed within 5 blocks and
+ * then you would look at the next highest feerate bucket, and so on, stopping at
+ * the last bucket to pass the test.   The average feerate of transactions in this
+ * bucket will give you an indication of the lowest feerate you can put on a
+ * transaction and still have a sufficiently high chance of being confirmed
+ * within your desired 5 blocks.
+ *
+ * Here is a brief description of the implementation:
+ * When a transaction enters the mempool, we track the height of the block chain
+ * at entry.  All further calculations are conducted only on this set of "seen"
+ * transactions. Whenever a block comes in, we count the number of transactions
+ * in each bucket and the total amount of feerate paid in each bucket. Then we
+ * calculate how many blocks Y it took each transaction to be mined.  We convert
+ * from a number of blocks to a number of periods Y' each encompassing "scale"
+ * blocks.  This is tracked in 3 different data sets each up to a maximum
+ * number of periods. Within each data set we have an array of counters in each
+ * feerate bucket and we increment all the counters from Y' up to max periods
+ * representing that a tx was successfully confirmed in less than or equal to
+ * that many periods. We want to save a history of this information, so at any
+ * time we have a counter of the total number of transactions that happened in a
+ * given feerate bucket and the total number that were confirmed in each of the
+ * periods or less for any bucket.  We save this history by keeping an
+ * exponentially decaying moving average of each one of these stats.  This is
+ * done for a different decay in each of the 3 data sets to keep relevant data
+ * from different time horizons.  Furthermore we also keep track of the number
+ * unmined (in mempool or left mempool without being included in a block)
+ * transactions in each bucket and for how many blocks they have been
+ * outstanding and use both of these numbers to increase the number of transactions
+ * we've seen in that feerate bucket when calculating an estimate for any number
+ * of confirmations below the number of blocks they've been outstanding.
+ *
+ *  We want to be able to estimate feerates that are needed on tx's to be included in
+ * a certain number of blocks.  Every time a block is added to the best chain, this class records
+ * stats on the transactions included in that block
+ */
+```
+
+* sanitize comments per BIP-0014, format user agent and check total size
+
+* 设置reachable net和dns seed
+* 设置代理
+* 设置手动指定的外部ip
 
 ## Step 7: 加载区块链
 该步骤把区块链数据加载到内存中，并初始化UTXO缓存。
