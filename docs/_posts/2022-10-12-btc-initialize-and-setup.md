@@ -1164,6 +1164,7 @@ CacheSizes CalculateCacheSizes(const ArgsManager& args, size_t n_indexes)
 }
 ```
 缓存主要包括以下几类：
+
 | Name            | size         | Description |
 |-----------------|--------------|-------------|
 | nTotalCache         |  默认为250MB      |  总缓存大小 |
