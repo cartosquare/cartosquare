@@ -1073,6 +1073,7 @@ node.banman = std::make_unique<BanMan>(gArgs.GetDataDirNet() / "banlist", &uiInt
 `CConman`是最顶层的网络管理类，接受`Addrman`, `NetGroupMan`作为构造参数。
 
 * 初始化fee估计类`CBlockPolicyEstimator`
+
 `CBlockPolicyEstimator`的设计见：`src/policy/fees.h`:
 
 ```c++
@@ -1138,27 +1139,487 @@ node.banman = std::make_unique<BanMan>(gArgs.GetDataDirNet() / "banlist", &uiInt
 #### 计算缓存大小
 细节见 `src/node/caches.cpp`内的`CalculateCachesSizes`实现。
 
-#### 加载block数据并验证最后几个block
+```c++
+CacheSizes CalculateCacheSizes(const ArgsManager& args, size_t n_indexes)
+{
+    int64_t nTotalCache = (args.GetIntArg("-dbcache", nDefaultDbCache) << 20);
+    nTotalCache = std::max(nTotalCache, nMinDbCache << 20); // total cache cannot be less than nMinDbCache
+    nTotalCache = std::min(nTotalCache, nMaxDbCache << 20); // total cache cannot be greater than nMaxDbcache
+    CacheSizes sizes;
+    sizes.block_tree_db = std::min(nTotalCache / 8, nMaxBlockDBCache << 20);
+    nTotalCache -= sizes.block_tree_db;
+    sizes.tx_index = std::min(nTotalCache / 8, args.GetBoolArg("-txindex", DEFAULT_TXINDEX) ? nMaxTxIndexCache << 20 : 0);
+    nTotalCache -= sizes.tx_index;
+    sizes.filter_index = 0;
+    if (n_indexes > 0) {
+        int64_t max_cache = std::min(nTotalCache / 8, max_filter_index_cache << 20);
+        sizes.filter_index = max_cache / n_indexes;
+        nTotalCache -= sizes.filter_index * n_indexes;
+    }
+    sizes.coins_db = std::min(nTotalCache / 2, (nTotalCache / 4) + (1 << 23)); // use 25%-50% of the remainder for disk cache
+    sizes.coins_db = std::min(sizes.coins_db, nMaxCoinsDBCache << 20); // cap total coins db cache
+    nTotalCache -= sizes.coins_db;
+    sizes.coins = nTotalCache; // the rest goes to in-memory cache
+    return sizes;
+}
+```
+缓存主要包括以下几类：
+| Name            | size         | Description |
+|-----------------|--------------|-------------|
+| nTotalCache         |  默认为250MB      |  总缓存大小 |
+| block_tree_db | 总缓存大小的1/8，但不超过2MB | 无索引区块链数据库缓存 |
+| tx_index| 剩余总缓存大小的1/8, 但不超过1GB | 带索引区块链数据缓存
+| filter_index | 剩余总缓存大小的1/8，但不超过1GB | block filter index cache|
+| coins_db | 剩余总缓存大小的一半 | UTXO数据库缓存|
+| coins| 剩余缓存 | UTXO内存缓存 |
+
+#### 加载区块链索引
+这一步把所有区块的索引都加载到内存中，并验证最后几个区块的有效性。
+
+区块原始数据在磁盘中存储在`blocks/blk*.dat`文件内。每一个dat文件128MB，每次按16MB大小分配。每一个blk*.dat文件都有一个对应的rev*.dat回退文件，用于在分叉时将区块从链中移除。
+
+区块数据的索引存储在LevelDB中，LevelDB是一个键值对（key-value）数据库，其中的`fxxxx`键（xxxx是区块原始文件名的数字）存储文件的基础信息，包括：
+* 文件中的区块数
+* 文件大小
+* 最小和最大区块高度
+* 最老和最新的区块时间
+
+文件信息类`CBlockFileInfo`类：
+
+```c++
+class CBlockFileInfo
+{
+public:
+    unsigned int nBlocks;      //!< number of blocks stored in file
+    unsigned int nSize;        //!< number of used bytes of block file
+    unsigned int nUndoSize;    //!< number of used bytes in the undo file
+    unsigned int nHeightFirst; //!< lowest height of block in file
+    unsigned int nHeightLast;  //!< highest height of block in file
+    uint64_t nTimeFirst;       //!< earliest time of block in file
+    uint64_t nTimeLast;        //!< latest time of block in file
+}
+````
+其中的`b`键记录的则是block在磁盘中的位置（文件及偏移）以及元信息，`b`键信息由`CDiskBlockIndex`序列化而来，包含如下字段：
+
+```c++
+    SERIALIZE_METHODS(CDiskBlockIndex, obj)
+    {
+        LOCK(::cs_main);
+        int _nVersion = s.GetVersion();
+        if (!(s.GetType() & SER_GETHASH)) READWRITE(VARINT_MODE(_nVersion, VarIntMode::NONNEGATIVE_SIGNED));
+
+        READWRITE(VARINT_MODE(obj.nHeight, VarIntMode::NONNEGATIVE_SIGNED));
+        READWRITE(VARINT(obj.nStatus));
+        READWRITE(VARINT(obj.nTx));
+        if (obj.nStatus & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO)) READWRITE(VARINT_MODE(obj.nFile, VarIntMode::NONNEGATIVE_SIGNED));
+        if (obj.nStatus & BLOCK_HAVE_DATA) READWRITE(VARINT(obj.nDataPos));
+        if (obj.nStatus & BLOCK_HAVE_UNDO) READWRITE(VARINT(obj.nUndoPos));
+
+        // block header
+        READWRITE(obj.nVersion);
+        READWRITE(obj.hashPrev);
+        READWRITE(obj.hashMerkleRoot);
+        READWRITE(obj.nTime);
+        READWRITE(obj.nBits);
+        READWRITE(obj.nNonce);
+    }
+```
+即block高度、状态、交易数、文件位置、偏移、回退偏移、以及block header相关字段。
+
+`CDiskBlockIndex`继承自`CBlockIndex`， 后者记录单个区块索引，包含如下成员变量：
+
+```c++
+
+/** The block chain is a tree shaped structure starting with the
+ * genesis block at the root, with each block potentially having multiple
+ * candidates to be the next block. A blockindex may have multiple pprev pointing
+ * to it, but at most one of them can be part of the currently active branch.
+ */
+class CBlockIndex
+{
+public:
+    //! pointer to the hash of the block, if any. Memory is owned by this CBlockIndex
+    const uint256* phashBlock{nullptr};
+
+    //! pointer to the index of the predecessor of this block
+    CBlockIndex* pprev{nullptr};
+
+    //! pointer to the index of some further predecessor of this block
+    CBlockIndex* pskip{nullptr};
+
+    //! height of the entry in the chain. The genesis block has height 0
+    int nHeight{0};
+
+    //! Which # file this block is stored in (blk?????.dat)
+    int nFile GUARDED_BY(::cs_main){0};
+
+    //! Byte offset within blk?????.dat where this block's data is stored
+    unsigned int nDataPos GUARDED_BY(::cs_main){0};
+
+    //! Byte offset within rev?????.dat where this block's undo data is stored
+    unsigned int nUndoPos GUARDED_BY(::cs_main){0};
+
+    //! (memory only) Total amount of work (expected number of hashes) in the chain up to and including this block
+    arith_uint256 nChainWork{};
+
+    //! Number of transactions in this block.
+    //! Note: in a potential headers-first mode, this number cannot be relied upon
+    //! Note: this value is faked during UTXO snapshot load to ensure that
+    //! LoadBlockIndex() will load index entries for blocks that we lack data for.
+    //! @sa ActivateSnapshot
+    unsigned int nTx{0};
+
+    //! (memory only) Number of transactions in the chain up to and including this block.
+    //! This value will be non-zero only if and only if transactions for this block and all its parents are available.
+    //! Change to 64-bit type before 2024 (assuming worst case of 60 byte transactions).
+    //!
+    //! Note: this value is faked during use of a UTXO snapshot because we don't
+    //! have the underlying block data available during snapshot load.
+    //! @sa AssumeutxoData
+    //! @sa ActivateSnapshot
+    unsigned int nChainTx{0};
+
+    //! Verification status of this block. See enum BlockStatus
+    //!
+    //! Note: this value is modified to show BLOCK_OPT_WITNESS during UTXO snapshot
+    //! load to avoid the block index being spuriously rewound.
+    //! @sa NeedsRedownload
+    //! @sa ActivateSnapshot
+    uint32_t nStatus GUARDED_BY(::cs_main){0};
+
+    //! block header
+    int32_t nVersion{0};
+    uint256 hashMerkleRoot{};
+    uint32_t nTime{0};
+    uint32_t nBits{0};
+    uint32_t nNonce{0};
+
+    //! (memory only) Sequential id assigned to distinguish order in which blocks are received.
+    int32_t nSequenceId{0};
+
+    //! (memory only) Maximum nTime in the chain up to and including this block.
+    unsigned int nTimeMax{0};
+}
+```
+`CBlockTreeDB`类负责序列化`CBlockFileInfo`以及`CBlockIndex`对象，即往LevelDB中写入f和b字段(txdb.cpp)：
+
+```c++
+bool CBlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*> >& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo) {
+    CDBBatch batch(*this);
+    for (std::vector<std::pair<int, const CBlockFileInfo*> >::const_iterator it=fileInfo.begin(); it != fileInfo.end(); it++) {
+        batch.Write(std::make_pair(DB_BLOCK_FILES, it->first), *it->second);
+    }
+    batch.Write(DB_LAST_BLOCK, nLastFile);
+    for (std::vector<const CBlockIndex*>::const_iterator it=blockinfo.begin(); it != blockinfo.end(); it++) {
+        batch.Write(std::make_pair(DB_BLOCK_INDEX, (*it)->GetBlockHash()), CDiskBlockIndex(*it));
+    }
+    return WriteBatch(batch, true);
+}
+```
+现在回到`src/init.cpp`的加载区块数据的代码：
 ```c++
         auto [status, error] = catch_exceptions([&]{ return LoadChainstate(chainman, cache_sizes, options); });
-        if (status == node::ChainstateLoadStatus::SUCCESS) {
-            uiInterface.InitMessage(_("Verifying blocks…").translated);
-            if (chainman.m_blockman.m_have_pruned && options.check_blocks > MIN_BLOCKS_TO_KEEP) {
-                LogPrintfCategory(BCLog::PRUNE, "pruned datadir may not have more than %d blocks; only checking available blocks\n",
-                                  MIN_BLOCKS_TO_KEEP);
-            }
-            std::tie(status, error) = catch_exceptions([&]{ return VerifyLoadedChainstate(chainman, options);});
-            if (status == node::ChainstateLoadStatus::SUCCESS) {
-                fLoaded = true;
-                LogPrintf(" block index %15dms\n", GetTimeMillis() - load_block_index_start_time);
-            }
-        }
 ```
-注意到UTXO并没有在此刻被加载到内存中，而是之后从数据库中读取时进行缓存。
+`LoadChainState`函数使用`ChainstateManager`类加载区块链状态。`ChainstateManager`提供了本地节点的最优区块链信息。它的内部调用了其它类完成实际的工作，比如，区块链索引信息是存储在`BlockManager`类中的`CBlockTreeDB`中,下面是`LoadChainstate`中 加载区块的关键代码：
+
+```c++
+    LOCK(cs_main);
+    chainman.InitializeChainstate(options.mempool);
+    chainman.m_total_coinstip_cache = cache_sizes.coins;
+    chainman.m_total_coinsdb_cache = cache_sizes.coins_db;
+
+    auto& pblocktree{chainman.m_blockman.m_block_tree_db};
+    // new CBlockTreeDB tries to delete the existing file, which
+    // fails if it's still open from the previous loop. Close it first:
+    pblocktree.reset();
+    pblocktree.reset(new CBlockTreeDB(cache_sizes.block_tree_db, options.block_tree_db_in_memory, options.reindex));
+
+    // 数据库设置reindex flag
+    if (options.reindex) {
+        pblocktree->WriteReindexing(true);
+        //If we're reindexing in prune mode, wipe away unusable block files and all undo data files
+        if (options.prune) {
+            CleanupBlockRevFiles();
+        }
+    }
+
+    if (options.check_interrupt && options.check_interrupt()) return {ChainstateLoadStatus::INTERRUPTED, {}};
+
+    // LoadBlockIndex will load m_have_pruned if we've ever removed a
+    // block file from disk.
+    // Note that it also sets fReindex global based on the disk flag!
+    // From here on, fReindex and options.reindex values may be different!
+    if (!chainman.LoadBlockIndex()) {
+        if (options.check_interrupt && options.check_interrupt()) return {ChainstateLoadStatus::INTERRUPTED, {}};
+        return {ChainstateLoadStatus::FAILURE, _("Error loading block database")};
+    }
+
+    if (!chainman.BlockIndex().empty() &&
+            !chainman.m_blockman.LookupBlockIndex(chainman.GetConsensus().hashGenesisBlock)) {
+        // If the loaded chain has a wrong genesis, bail out immediately
+        // (we're likely using a testnet datadir, or the other way around).
+        return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB, _("Incorrect or no genesis block found. Wrong datadir for network?")};
+    }
+
+    // Check for changed -prune state.  What we are concerned about is a user who has pruned blocks
+    // in the past, but is now trying to run unpruned.
+    if (chainman.m_blockman.m_have_pruned && !options.prune) {
+        return {ChainstateLoadStatus::FAILURE, _("You need to rebuild the database using -reindex to go back to unpruned mode.  This will redownload the entire blockchain")};
+    }
+
+    // At this point blocktree args are consistent with what's on disk.
+    // If we're not mid-reindex (based on disk + args), add a genesis block on disk
+    // (otherwise we use the one already on disk).
+    // This is called again in ThreadImport after the reindex completes.
+    if (!fReindex && !chainman.ActiveChainstate().LoadGenesisBlock()) {
+        return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
+    }
+```
+这里创建了`CBlockTreeDB`的实例`pblocktree`，并调用`ChainstateManager`的`LoadBlockIndex`函数来加载区块索引：
+
+```c++
+bool ChainstateManager::LoadBlockIndex()
+{
+    AssertLockHeld(cs_main);
+    // Load block index from databases
+    bool needs_init = fReindex;
+    if (!fReindex) {
+        bool ret = m_blockman.LoadBlockIndexDB(GetConsensus());
+...
+```
+内部又调用了`BlockManager`的`LoadBlockIndexDB`函数：
+
+```c++
+bool BlockManager::LoadBlockIndexDB(const Consensus::Params& consensus_params)
+{
+    if (!LoadBlockIndex(consensus_params)) {
+        return false;
+    }
+...
+```
+`LoadBlockIndexDB`内部又调用了`LoadBlockIndex`函数：
+
+```c++
+bool BlockManager::LoadBlockIndex(const Consensus::Params& consensus_params)
+{
+    if (!m_block_tree_db->LoadBlockIndexGuts(consensus_params, [this](const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main) { return this->InsertBlockIndex(hash); })) {
+        return false;
+    }
+...
+```
+可以看出，最终是调用的`CBlockTreeDB`类的`LoadBlockIndexGuts`函数：
+
+```c++
+bool CBlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex)
+{
+    AssertLockHeld(::cs_main);
+    std::unique_ptr<CDBIterator> pcursor(NewIterator());
+    pcursor->Seek(std::make_pair(DB_BLOCK_INDEX, uint256()));
+
+    // Load m_block_index
+    while (pcursor->Valid()) {
+        if (ShutdownRequested()) return false;
+        std::pair<uint8_t, uint256> key;
+        if (pcursor->GetKey(key) && key.first == DB_BLOCK_INDEX) {
+            CDiskBlockIndex diskindex;
+            if (pcursor->GetValue(diskindex)) {
+                // Construct block index object
+                CBlockIndex* pindexNew = insertBlockIndex(diskindex.ConstructBlockHash());
+                pindexNew->pprev          = insertBlockIndex(diskindex.hashPrev);
+                pindexNew->nHeight        = diskindex.nHeight;
+                pindexNew->nFile          = diskindex.nFile;
+                pindexNew->nDataPos       = diskindex.nDataPos;
+                pindexNew->nUndoPos       = diskindex.nUndoPos;
+                pindexNew->nVersion       = diskindex.nVersion;
+                pindexNew->hashMerkleRoot = diskindex.hashMerkleRoot;
+                pindexNew->nTime          = diskindex.nTime;
+                pindexNew->nBits          = diskindex.nBits;
+                pindexNew->nNonce         = diskindex.nNonce;
+                pindexNew->nStatus        = diskindex.nStatus;
+                pindexNew->nTx            = diskindex.nTx;
+
+                if (!CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, consensusParams)) {
+                    return error("%s: CheckProofOfWork failed: %s", __func__, pindexNew->ToString());
+                }
+
+                pcursor->Next();
+            } else {
+                return error("%s: failed to read value", __func__);
+            }
+        } else {
+            break;
+        }
+    }
+
+    return true;
+}
+```
+这个函数遍历LevelDB内所有的b字段，把block序列化到`CDiskBlockIndex`中，并插入到`BlockManager`类的`m_block_index`中，最后在`CheckProofOfWork`函数中验证block的有效性。这里的检查主要是看block是否满足pow计算量的要求。`m_block_index`是`BlockMap`类型，存储了所有的Block的索引。
+
+```c++
+// Because validation code takes pointers to the map's CBlockIndex objects, if
+// we ever switch to another associative container, we need to either use a
+// container that has stable addressing (true of all std associative
+// containers), or make the key a `std::unique_ptr<CBlockIndex>`
+using BlockMap = std::unordered_map<uint256, CBlockIndex, BlockHasher>;
+```
+
+加载完block索引后，在`ChainstateManager`的`LoadBlockIndex`函数中对所有的索引按照区块高度进行排序，并设置`setBlockIndexCandidates`(最高区块高度候选区块):
+```c++
+    /**
+     * The set of all CBlockIndex entries with either BLOCK_VALID_TRANSACTIONS (for
+     * itself and all ancestors) *or* BLOCK_ASSUMED_VALID (if using background
+     * chainstates) and as good as our current tip or better. Entries may be failed,
+     * though, and pruning nodes may be missing the data for the block.
+     */
+    std::set<CBlockIndex*, node::CBlockIndexWorkComparator> setBlockIndexCandidates;
+```
+
+继续回到`LoadChainstate`函数中，加载完区块索引后，如果索引非空，检查创世区块是否包含在里面；如果索引为空，说明磁盘里没有数据库，此时加载创世区块：
+
+```c++
+    if (!chainman.BlockIndex().empty() &&
+            !chainman.m_blockman.LookupBlockIndex(chainman.GetConsensus().hashGenesisBlock)) {
+        // If the loaded chain has a wrong genesis, bail out immediately
+        // (we're likely using a testnet datadir, or the other way around).
+        return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB, _("Incorrect or no genesis block found. Wrong datadir for network?")};
+    }
+
+    // Check for changed -prune state.  What we are concerned about is a user who has pruned blocks
+    // in the past, but is now trying to run unpruned.
+    if (chainman.m_blockman.m_have_pruned && !options.prune) {
+        return {ChainstateLoadStatus::FAILURE, _("You need to rebuild the database using -reindex to go back to unpruned mode.  This will redownload the entire blockchain")};
+    }
+
+    // At this point blocktree args are consistent with what's on disk.
+    // If we're not mid-reindex (based on disk + args), add a genesis block on disk
+    // (otherwise we use the one already on disk).
+    // This is called again in ThreadImport after the reindex completes.
+    if (!fReindex && !chainman.ActiveChainstate().LoadGenesisBlock()) {
+        return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
+    }
+```
+加载创世区块的逻辑之后再说。
+
+程序执行到这里，我们要么处于需要重新索引的状态，要么已经有了一个完整的区块索引树。接下来则是初始化UTXO：
+
+```c++
+    for (CChainState* chainstate : chainman.GetAll()) {
+        chainstate->InitCoinsDB(
+            /*cache_size_bytes=*/cache_sizes.coins_db,
+            /*in_memory=*/options.coins_db_in_memory,
+            /*should_wipe=*/options.reindex || options.reindex_chainstate);
+
+        if (options.coins_error_cb) {
+            chainstate->CoinsErrorCatcher().AddReadErrCallback(options.coins_error_cb);
+        }
+
+        // Refuse to load unsupported database format.
+        // This is a no-op if we cleared the coinsviewdb with -reindex or -reindex-chainstate
+        if (chainstate->CoinsDB().NeedsUpgrade()) {
+            return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB, _("Unsupported chainstate database format found. "
+                                                                     "Please restart with -reindex-chainstate. This will "
+                                                                     "rebuild the chainstate database.")};
+        }
+
+        // ReplayBlocks is a no-op if we cleared the coinsviewdb with -reindex or -reindex-chainstate
+        if (!chainstate->ReplayBlocks()) {
+            return {ChainstateLoadStatus::FAILURE, _("Unable to replay blocks. You will need to rebuild the database using -reindex-chainstate.")};
+        }
+
+        // The on-disk coinsdb is now in a good state, create the cache
+        chainstate->InitCoinsCache(cache_sizes.coins);
+        assert(chainstate->CanFlushToDisk());
+
+        if (!is_coinsview_empty(chainstate)) {
+            // LoadChainTip initializes the chain based on CoinsTip()'s best block
+            if (!chainstate->LoadChainTip()) {
+                return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
+            }
+            assert(chainstate->m_chain.Tip() != nullptr);
+        }
+    }
+```
+这里`CChainState`调用`InitCoionsDB`方法初始化UTXO，内部是创建了`CoinsViews`，这个类包含了磁盘db存储`CCoinsViewDB`以及内存缓存`CCoinsViewCache`：
+
+```c++
+/**
+ * A convenience class for constructing the CCoinsView* hierarchy used
+ * to facilitate access to the UTXO set.
+ *
+ * This class consists of an arrangement of layered CCoinsView objects,
+ * preferring to store and retrieve coins in memory via `m_cacheview` but
+ * ultimately falling back on cache misses to the canonical store of UTXOs on
+ * disk, `m_dbview`.
+ */
+class CoinsViews {
+
+public:
+    //! The lowest level of the CoinsViews cache hierarchy sits in a leveldb database on disk.
+    //! All unspent coins reside in this store.
+    CCoinsViewDB m_dbview GUARDED_BY(cs_main);
+
+    //! This view wraps access to the leveldb instance and handles read errors gracefully.
+    CCoinsViewErrorCatcher m_catcherview GUARDED_BY(cs_main);
+
+    //! This is the top layer of the cache hierarchy - it keeps as many coins in memory as
+    //! can fit per the dbcache setting.
+    std::unique_ptr<CCoinsViewCache> m_cacheview GUARDED_BY(cs_main);
+
+    //! This constructor initializes CCoinsViewDB and CCoinsViewErrorCatcher instances, but it
+    //! *does not* create a CCoinsViewCache instance by default. This is done separately because the
+    //! presence of the cache has implications on whether or not we're allowed to flush the cache's
+    //! state to disk, which should not be done until the health of the database is verified.
+    //!
+    //! All arguments forwarded onto CCoinsViewDB.
+    CoinsViews(fs::path ldb_name, size_t cache_size_bytes, bool in_memory, bool should_wipe);
+
+    //! Initialize the CCoinsViewCache member.
+    void InitCache() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+};
+```
+内存缓存的设计是为了加速UTXO的读取速度，因为UTXO会比区块索引大很多。`InitCoionsDB`后，使用`InitCoinsCache`创建UTXO内存缓存。注意到UTXO并没有在此刻被加载到内存中，而是之后从数据库中读取时进行缓存。
 
 ## Step 8: 开启索引
 
+```c++
+    if (args.GetBoolArg("-txindex", DEFAULT_TXINDEX)) {
+        if (const auto error{WITH_LOCK(cs_main, return CheckLegacyTxindex(*Assert(chainman.m_blockman.m_block_tree_db)))}) {
+            return InitError(*error);
+        }
+
+        g_txindex = std::make_unique<TxIndex>(interfaces::MakeChain(node), cache_sizes.tx_index, false, fReindex);
+        if (!g_txindex->Start()) {
+            return false;
+        }
+    }
+
+    for (const auto& filter_type : g_enabled_filter_types) {
+        InitBlockFilterIndex([&]{ return interfaces::MakeChain(node); }, filter_type, cache_sizes.filter_index, false, fReindex);
+        if (!GetBlockFilterIndex(filter_type)->Start()) {
+            return false;
+        }
+    }
+
+    if (args.GetBoolArg("-coinstatsindex", DEFAULT_COINSTATSINDEX)) {
+        g_coin_stats_index = std::make_unique<CoinStatsIndex>(interfaces::MakeChain(node), /* cache size */ 0, false, fReindex);
+        if (!g_coin_stats_index->Start()) {
+            return false;
+        }
+    }
+```
+索引主要包括`TxIndex`, `BlockFilterIndex`以及`CoinStatsIndex`。索引建立之后再说。
+
 ## Step 9: 加载钱包
+
+```c++
+    for (const auto& client : node.chain_clients) {
+        if (!client->load()) {
+            return false;
+        }
+    }
+```
+具体代码在`src/wallet/load.cpp`内的`LoadWallets`函数，之后再说。
 
 ## Step 10: 数据目录维护
 
