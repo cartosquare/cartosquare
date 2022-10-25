@@ -1177,7 +1177,7 @@ CacheSizes CalculateCacheSizes(const ArgsManager& args, size_t n_indexes)
 #### 加载区块链索引
 这一步把所有区块的索引都加载到内存中，并验证最后几个区块的有效性。
 
-区块原始数据在磁盘中存储在`blocks/blk*.dat`文件内。每一个dat文件128MB，每次按16MB大小分配。每一个blk*.dat文件都有一个对应的rev*.dat回退文件，用于在分叉时将区块从链中移除。
+区块原始数据在磁盘中存储在`blocks/blk*.dat`文件内。每一个dat文件128MB，每次按16MB大小分配。每一个`blk*.dat`文件都有一个对应的`rev*.dat`回退文件，用于在分叉时将区块从链中移除。
 
 区块数据的索引存储在LevelDB中，LevelDB是一个键值对（key-value）数据库，其中的`fxxxx`键（xxxx是区块原始文件名的数字）存储文件的基础信息，包括：
 * 文件中的区块数

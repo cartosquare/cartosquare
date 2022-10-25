@@ -789,7 +789,7 @@ bitcoin_cli_LDADD += $(EVENT_LIBS)
 
 ### 编译配置
 
-VS Code菜单项 终端->运行任务可以执行预先配置好的任务，该任务在代码目录下的.vscode/tasks.json内配置，因此，可以把configure和make这两个常用的编译任务配置一下。
+VS Code菜单项*终端->运行任务*可以执行预先配置好的任务，该任务在代码目录下的`.vscode/tasks.json`内配置，因此，可以把`configure`和`make`这两个常用的编译任务配置一下。
 
 ```json
 {
@@ -843,13 +843,15 @@ VS Code菜单项 终端->运行任务可以执行预先配置好的任务，该�
     "version": "2.0.0"
 }
 ```
-这里我们定义了`configure`和`make`两个task，可以在终端->运行任务...里选择执行。
+这里我们定义了`configure`和`make`两个task，可以在`终端->运行任务...`里选择执行。
 
 注意到`configire`时加入了禁止编译器进行优化的选项，这是为了后续能够进行调试。生产环境需要把`CXXFLAGS`和`CFLAGS`去掉。
 
+`cwd`字段指定的是编译位于的目录，为了不让编译物和源代码混在一起，新建了`build`目录进行编译。
+
 ### 调试配置
 
-vs code菜单项运行—>启动调试可以启动调试任务，调试任务的配置在.vscode/launch.json内：
+vs code菜单项*运行—>启动调试*可以启动调试任务，调试任务的配置在`.vscode/launch.json`内：
 
 ```json
 {
@@ -893,7 +895,7 @@ vs code菜单项运行—>启动调试可以启动调试任务，调试任务的
 
 * c++ 单元测试
 
-执行单个文件内的所有 单元测试：
+执行单个文件内的所有单元测试：
 
 ```c++
 src/test/test_bitcoin --log_level=all --run_test=getarg_tests
