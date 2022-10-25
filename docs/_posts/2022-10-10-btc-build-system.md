@@ -783,3 +783,129 @@ bitcoin_cli_LDADD = \
 
 bitcoin_cli_LDADD += $(EVENT_LIBS)
 ```
+
+
+## VS Code 开发配置
+
+### 编译配置
+
+VS Code菜单项 终端->运行任务可以执行预先配置好的任务，该任务在代码目录下的.vscode/tasks.json内配置，因此，可以把configure和make这两个常用的编译任务配置一下。
+
+```json
+{
+    "tasks": [
+        {
+            "type": "shell",
+            "label": "configure",
+            "command": "../configure",
+            "args": [
+                "CXXFLAGS=\"-O0 -g\"",
+                "CFLAGS=\"-O0 -g\"",
+                "BDB_LIBS=\"-L/home/ubuntu/calmdown/bitcoin/db4/lib -ldb_cxx-4.8\"",
+                "BDB_CFLAGS=\"-I/home/ubuntu/calmdown/bitcoin/db4/include\"",
+                "--enable-debug",
+                "--enable-lcov",
+                "--enable-gprof",
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/build"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": "build",
+        },
+        {
+            "type": "shell",
+            "label": "make",
+            "command": "make",
+            "args": [
+                "-j4",
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/build"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "new"
+            },
+        },
+    ],
+    "version": "2.0.0"
+}
+```
+这里我们定义了`configure`和`make`两个task，可以在终端->运行任务...里选择执行。
+
+注意到`configire`时加入了禁止编译器进行优化的选项，这是为了后续能够进行调试。生产环境需要把`CXXFLAGS`和`CFLAGS`去掉。
+
+### 调试配置
+
+vs code菜单项运行—>启动调试可以启动调试任务，调试任务的配置在.vscode/launch.json内：
+
+```json
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "(gdb) Launch",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/src/bitcoind",
+            "args": [
+              "-testnet"
+              "-prune=8000"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "preLaunchTask": "make",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ]
+        }
+    ]
+}
+```
+这里通过`program`字段指定了调试程序的路径，`args`参数显示了这个调试任务启动的是测试网络。
+注意到这里的`preLaunchTask`指定了在`tasks.json`中的`make`任务，表明在进行调试前会先执行编译。
+
+另外程序的debug输出会位于bitcoin目录下的debug.log文件内，该文件记录的是通过`LogPrintf`函数打印的log。
+
+更多详细debug方式见：https://github.com/fjahr/debugging_bitcoin
+
+### 执行测试
+
+测试分为单元测试(c++)和功能测试(python)
+
+* c++ 单元测试
+
+执行单个文件内的所有 单元测试：
+
+```c++
+src/test/test_bitcoin --log_level=all --run_test=getarg_tests
+```
+
+只执行一个单元测试
+
+```c++
+src/test/test_bitcoin --log_level=all --run_test=*/the_one_test
+```
+详见：https://github.com/bitcoin/bitcoin/blob/master/src/test/README.md
+
+* python 功能测试
+
+详见：https://github.com/bitcoin/bitcoin/blob/master/test/README.md
