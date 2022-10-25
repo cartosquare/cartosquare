@@ -253,7 +253,7 @@ InitParameterInteraction(args);
 
 * `fCheckBlockIndex`: 是否周期性检查区块树、区块链状态等数据结构的一致性
 * `fCheckpointsEnabled`: 允许拒绝在某个checkpoint之前的分叉
-* `hashAssumeValid`: 这个变量指定一个block hash，验证引擎会假定这个block以及这个block的父block是有效的，不会进行签名验证。
+* `hashAssumeValid`: 这个变量指定一个block hash，验证引擎会假定这个block以及这个block的父block是有效的，不会进行签名验证。详细解析见：`https://github.com/CryptAxe/info/blob/master/AssumeValid.md`
 
 ```c++
     hashAssumeValid = uint256S(args.GetArg("-assumevalid", chainparams.GetConsensus().defaultAssumeValid.GetHex()));
@@ -843,7 +843,7 @@ public:
         }
     }
 ```
-这一步主要是做钱包数据库的完整性检查。SQLite is required for the descriptor wallet；Berkeley DB is required for the legacy wallet.。
+这一步主要是做钱包数据库的完整性检查。SQLite is required for the descriptor wallet；Berkeley DB is required for the legacy wallet。
 
 ## Step 6: 网络初始化
 
@@ -1305,6 +1305,9 @@ public:
 `CBlockTreeDB`类负责序列化`CBlockFileInfo`以及`CBlockIndex`对象，即往LevelDB中写入f和b字段(txdb.cpp)：
 
 ```c++
+static constexpr uint8_t DB_BLOCK_FILES{'f'};
+static constexpr uint8_t DB_BLOCK_INDEX{'b'};
+
 bool CBlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*> >& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo) {
     CDBBatch batch(*this);
     for (std::vector<std::pair<int, const CBlockFileInfo*> >::const_iterator it=fileInfo.begin(); it != fileInfo.end(); it++) {
@@ -1316,6 +1319,8 @@ bool CBlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockF
     }
     return WriteBatch(batch, true);
 }
+可以看出，实现上，LevelDB的key实际上是一个std::pair，对于`f`记录来说，是一个`<f, fileNum>`的二元组，对于`b`记录来说，是一个`<b, blockHash>`的二元组。
+
 ```
 现在回到`src/init.cpp`的加载区块数据的代码：
 ```c++
@@ -1455,7 +1460,7 @@ bool CBlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, 
     return true;
 }
 ```
-这个函数遍历LevelDB内所有的b字段，把block序列化到`CDiskBlockIndex`中，并插入到`BlockManager`类的`m_block_index`中，最后在`CheckProofOfWork`函数中验证block的有效性。这里的检查主要是看block是否满足pow计算量的要求。`m_block_index`是`BlockMap`类型，存储了所有的Block的索引。
+这个函数遍历LevelDB内所有的b字段，把block序列化到`CDiskBlockIndex`中，并插入到`BlockManager`类的`m_block_index`中，`m_block_index`是`BlockMap`类型，存储了所有的Block的索引：
 
 ```c++
 // Because validation code takes pointers to the map's CBlockIndex objects, if
@@ -1463,6 +1468,31 @@ bool CBlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, 
 // container that has stable addressing (true of all std associative
 // containers), or make the key a `std::unique_ptr<CBlockIndex>`
 using BlockMap = std::unordered_map<uint256, CBlockIndex, BlockHasher>;
+```
+
+最后在`CheckProofOfWork`函数中验证block的有效性。这里的检查主要是看block是否满足pow计算量的要求:
+
+```c++
+bool CheckProofOfWork(uint256 hash, unsigned int nBits, const Consensus::Params& params)
+{
+    bool fNegative;
+    bool fOverflow;
+    arith_uint256 bnTarget;
+
+    // 根据32位的nBit计算256位的bnTarget，即目标计算量
+    bnTarget.SetCompact(nBits, &fNegative, &fOverflow);
+
+    // Check range
+    if (fNegative || bnTarget == 0 || fOverflow || bnTarget > UintToArith256(params.powLimit))
+        return false;
+
+    // Check proof of work matches claimed amount
+    if (UintToArith256(hash) > bnTarget)
+        return false;
+
+    // 只有区块的hash值小于目标值才通过工作量验证。
+    return true;
+}
 ```
 
 加载完block索引后，在`ChainstateManager`的`LoadBlockIndex`函数中对所有的索引按照区块高度进行排序，并设置`setBlockIndexCandidates`(最高区块高度候选区块):
