@@ -1319,9 +1319,10 @@ bool CBlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockF
     }
     return WriteBatch(batch, true);
 }
+```
+
 可以看出，实现上，LevelDB的key实际上是一个std::pair，对于`f`记录来说，是一个`<f, fileNum>`的二元组，对于`b`记录来说，是一个`<b, blockHash>`的二元组。
 
-```
 现在回到`src/init.cpp`的加载区块数据的代码：
 ```c++
         auto [status, error] = catch_exceptions([&]{ return LoadChainstate(chainman, cache_sizes, options); });
